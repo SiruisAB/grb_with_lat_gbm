@@ -9,8 +9,8 @@ LAT Extended + GtBurst + threeML 全流程（由原 ``3MLprogram/new.py`` 迁入
 from __future__ import annotations
 
 import contextlib
+import json
 import os
-import re
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Dict, Iterator, Optional
@@ -107,6 +107,59 @@ def _resolve_ft_paths(
     )
 
 
+def _analyze_gbm_aligned_time_window(
+    event_times_rel_s: np.ndarray,
+    energies_mev: np.ndarray,
+    t0_s: float,
+    t1_s: float,
+) -> Dict[str, Any]:
+    """
+    在相对触发的时间轴上，统计与 ``analyze_single`` 中 ``t0``–``t1`` 重合时段内的 LAT 事例。
+
+    ``t0_s``/``t1_s`` 须与 ``selection["tstart"]`` / ``selection["tstop"]`` 一致（即单次分析里
+    所用的源时间窗，相对 MET 触发）。
+    """
+    t0_s = float(t0_s)
+    t1_s = float(t1_s)
+    tt = np.asarray(event_times_rel_s, dtype=float)
+    ee = np.asarray(energies_mev, dtype=float)
+    n_tot = int(tt.size)
+    mask = (tt >= t0_s) & (tt <= t1_s)
+    n_in = int(np.sum(mask))
+    stats: Dict[str, Any] = {
+        "analysis_t0_s": t0_s,
+        "analysis_t1_s": t1_s,
+        "window_duration_s": float(t1_s - t0_s),
+        "n_events_total_filtered_file": n_tot,
+        "n_events_in_analyze_single_window": n_in,
+        "fraction_events_in_window": (
+            float(n_in / n_tot) if n_tot > 0 else 0.0
+        ),
+    }
+    if n_in > 0:
+        ew = ee[mask]
+        stats["mean_energy_MeV_in_window"] = float(np.mean(ew))
+        stats["median_energy_MeV_in_window"] = float(np.median(ew))
+        stats["max_energy_MeV_in_window"] = float(np.max(ew))
+    else:
+        stats["mean_energy_MeV_in_window"] = None
+        stats["median_energy_MeV_in_window"] = None
+        stats["max_energy_MeV_in_window"] = None
+
+    pd.Series(stats).to_csv("lat_gbm_window_time_analysis.csv")
+    with open(
+        "lat_gbm_window_time_analysis.json",
+        "w",
+        encoding="utf-8",
+    ) as fj:
+        json.dump(stats, fj, indent=2, ensure_ascii=False)
+    log(
+        "LAT 时间窗统计（与 analyze_single 的 t0、t1 对齐）: "
+        f"[{t0_s:g}, {t1_s:g}] s → 窗内事例 {n_in}/{n_tot}"
+    )
+    return stats
+
+
 def run_lat_extended_three_ml_pipeline(
     *,
     bn_dir: str,
@@ -123,7 +176,8 @@ def run_lat_extended_three_ml_pipeline(
     :param bn_dir: ``…/{result_root}/{grb_name}/{bn_name}/``，处理期间会切换到此目录
     :param bn_name: GBM 触发名，如 ``bn231129799``
     :param grb_name: GCN 名，如 ``GRB231129C``
-    :param selection: 须含 tstart, tstop, ra, dec, trigger_time；可选 irfs, data_type, Emin, Emax
+    :param selection: 须含 tstart, tstop, ra, dec, trigger_time；可选 irfs, data_type, Emin, Emax。
+        其中 **tstart/tstop** 应与 ``analyze_single`` 里最终采用的 **t0/t1**（相对触发，秒）一致。
     :param result_parent: ``LAT_dataset.make_LAT_dataset`` 的 destination_directory（一般为 ``…/{grb_name}``）
     :param extended_data_dir: 复制前的 Extended 目录 ``…/Extended_data_ex/{grb_name}``
     """
@@ -211,8 +265,26 @@ def run_lat_extended_three_ml_pipeline(
             lat_events = event_file["EVENTS"].data
         event_times = lat_events["TIME"] - float(selection["trigger_time"])
 
-        tstart_ev = max(float(np.min(event_times)) - 15.0, float(selection["tstart"]))
-        tstop_ev = min(float(np.max(event_times)) + 15.0, float(selection["tstop"]))
+        # 与 analyze_single 中 t0、t1 完全一致的分析窗（selection 由该流程填入）
+        t0_analysis = float(selection["tstart"])
+        t1_analysis = float(selection["tstop"])
+        energies_arr = np.asarray(lat_events["ENERGY"], dtype=float)
+        win_stats = _analyze_gbm_aligned_time_window(
+            np.asarray(event_times, dtype=float),
+            energies_arr,
+            t0_analysis,
+            t1_analysis,
+        )
+        result_data.update(win_stats)
+
+        tstart_ev = max(
+            float(np.min(event_times)) - 15.0,
+            t0_analysis,
+        )
+        tstop_ev = min(
+            float(np.max(event_times)) + 15.0,
+            t1_analysis,
+        )
 
         bin_width_s = 2.0
         intervals = np.arange(
@@ -225,6 +297,15 @@ def run_lat_extended_three_ml_pipeline(
         import matplotlib.pyplot as plt
 
         fig, axs = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
+        for ax in axs:
+            ax.axvspan(
+                t0_analysis,
+                t1_analysis,
+                alpha=0.22,
+                color="tab:green",
+                zorder=0,
+                label="analyze_single [t0,t1]",
+            )
         axs[0].hist(
             event_times,
             bins=intervals,
@@ -247,8 +328,57 @@ def run_lat_extended_three_ml_pipeline(
         axs[1].set_ylabel("Energy [MeV]")
         axs[1].set_xlabel("Time - T0 [s]")
         axs[1].grid(True)
+        h0, l0 = axs[0].get_legend_handles_labels()
+        if h0:
+            axs[0].legend(h0, l0, loc="upper right", fontsize=9)
         fig.savefig("events.png")
         plt.close(fig)
+
+        # 仅聚焦与 analyze_single 相同的 [t0,t1] 附近的可视化
+        dur = max(t1_analysis - t0_analysis, 1e-6)
+        pad = max(0.05 * dur, 1.0)
+        x0_win = t0_analysis - pad
+        x1_win = t1_analysis + pad
+        et = np.asarray(event_times, dtype=float)
+        mask_w = (et >= x0_win) & (et <= x1_win)
+        tw = et[mask_w]
+        ew = energies_arr[mask_w]
+        bins_w = np.arange(x0_win, x1_win + bin_width_s, bin_width_s)
+
+        fig_w, axw = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
+        for ax in axw:
+            ax.axvspan(
+                t0_analysis,
+                t1_analysis,
+                alpha=0.22,
+                color="tab:green",
+                zorder=0,
+            )
+        if tw.size:
+            axw[0].hist(tw, bins=bins_w, histtype="stepfilled", alpha=0.3, color="C0")
+            axw[0].hist(tw, bins=bins_w, histtype="step", color="C0")
+            axw[1].scatter(
+                tw,
+                ew,
+                marker="o",
+                c=ew,
+                norm="log",
+                alpha=0.55,
+                zorder=20,
+            )
+        axw[0].set_ylabel("Events")
+        axw[0].set_title(
+            "LAT vs analyze_single time window "
+            f"[t0,t1]=[{t0_analysis:g},{t1_analysis:g}] s (relative to trigger)"
+        )
+        axw[1].set_yscale("log")
+        axw[1].set_ylabel("Energy [MeV]")
+        axw[1].set_xlabel("Time - T0 [s]")
+        axw[1].grid(True)
+        axw[0].set_xlim(x0_win, x1_win)
+        fig_w.tight_layout()
+        fig_w.savefig("events_analyze_single_window.png", dpi=150)
+        plt.close(fig_w)
 
         tstarts_list: list[str] = []
         tstops_list: list[str] = []

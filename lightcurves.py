@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -113,6 +114,48 @@ def load_lat_ft1_events(
     lat_time_rel = np.asarray(ev["TIME"], dtype=float) - float(trigger_met)
     lat_energy_mev = np.asarray(ev["ENERGY"], dtype=float)
     return lat_time_rel, lat_energy_mev
+
+
+def discover_lat_prob_fit_files(result_bn_dir: Union[str, Path]) -> List[Path]:
+    """
+    与 ``lat_extended_three_ml`` 输出一致：在单次暴结果目录下查找
+    ``interval{tstart}-{tstop}/gll_ft1_tr_bn*_v00_filt_prob.fit``。
+    """
+    d = Path(result_bn_dir)
+    if not d.is_dir():
+        return []
+    return sorted(d.glob("interval*/gll_ft1_tr_bn*_v00_filt_prob.fit"))
+
+
+def load_lat_ft1_prob_events(
+    prob_files: Sequence[Union[str, Path]],
+    trigger_met: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    从 ``filt_prob.fit`` 的 EVENTS 读取相对触发时间 [s]、能量 [MeV]、GRB 概率列（与
+    ``lat_extended_three_ml`` 中 ``events["GRB"]`` 一致）。
+    """
+    if not prob_files:
+        return (
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+        )
+    rel_list: List[np.ndarray] = []
+    en_list: List[np.ndarray] = []
+    pr_list: List[np.ndarray] = []
+    tm = float(trigger_met)
+    for pf in prob_files:
+        with fits.open(str(pf)) as hdul:
+            events = hdul["EVENTS"].data
+        rel_list.append(np.asarray(events["TIME"], dtype=float) - tm)
+        en_list.append(np.asarray(events["ENERGY"], dtype=float))
+        pr_list.append(np.asarray(events["GRB"], dtype=float))
+    return (
+        np.concatenate(rel_list),
+        np.concatenate(en_list),
+        np.concatenate(pr_list),
+    )
 
 
 def shade_active_interval(
@@ -300,6 +343,8 @@ def plot_gbm_lat_lightcurve_figure(
     trigger_met: Optional[float] = None,
     data_dir: Optional[str] = None,
     lat_extended_root: Optional[str] = None,
+    lat_prob_bn_dir: Optional[Union[str, Path]] = None,
+    lat_prob_threshold: float = 0.9,
     gbm_start: float = -2.0,
     gbm_stop: float = 20.0,
     gbm_dt: float = 0.1,
@@ -325,6 +370,13 @@ def plot_gbm_lat_lightcurve_figure(
     ----------
     include_lat
         为 False 时仅三幅 GBM 子图，不读取 LAT FT1。
+    lat_prob_bn_dir
+        含 ``interval*/gll_ft1_tr_bn*_v00_filt_prob.fit`` 的目录（与 ``lat_extended_three_ml``
+        在 ``{result_root}/{grb_name}/{bn_name}/`` 下产物一致）。默认使用
+        ``session.result_root / grb_name / bnname``；若该目录下无 prob 文件则回退读取
+        Extended_data_ex 的 ``L*EV00.fits``。
+    lat_prob_threshold
+        ``PROB`` 大于该阈值时散点为实心圆，否则为空心圆（仅在使用 ``filt_prob.fit`` 时生效）。
     out_path
         若给定则 ``savefig``；默认 ``{grb_name}_Lightcurve.png`` 保存在当前工作目录。
     """
@@ -342,10 +394,22 @@ def plot_gbm_lat_lightcurve_figure(
 
     lat_time_rel: Optional[np.ndarray] = None
     lat_energy_mev: Optional[np.ndarray] = None
+    lat_prob: Optional[np.ndarray] = None
     if include_lat:
-        lat_root = Path(lat_extended_root or DEFAULT_LAT_EXTENDED_ROOT)
-        lat_dir = lat_root / str(grb_name)
-        lat_time_rel, lat_energy_mev = load_lat_ft1_events(lat_dir, float(trigger_met))
+        prob_base = (
+            Path(lat_prob_bn_dir)
+            if lat_prob_bn_dir is not None
+            else Path(session.result_root) / str(grb_name) / str(bnname)
+        )
+        prob_files = discover_lat_prob_fit_files(prob_base)
+        if prob_files:
+            lat_time_rel, lat_energy_mev, lat_prob = load_lat_ft1_prob_events(
+                prob_files, float(trigger_met)
+            )
+        else:
+            lat_root = Path(lat_extended_root or DEFAULT_LAT_EXTENDED_ROOT)
+            lat_dir = lat_root / str(grb_name)
+            lat_time_rel, lat_energy_mev = load_lat_ft1_events(lat_dir, float(trigger_met))
 
     ref_tte, _ = resolve_gbm_tte_rsp(grb_dir, nai_detector_ids[0])
 
@@ -460,16 +524,56 @@ def plot_gbm_lat_lightcurve_figure(
         ax_lat.grid(True, alpha=0.3)
 
         ax_e = ax_lat.twinx()
-        ax_e.scatter(
-            lat_time_rel[lat_plot],
-            lat_energy_mev[lat_plot],
-            c=lat_energy_mev[lat_plot],
-            norm="log",
-            alpha=0.55,
-            s=14,
-            zorder=5,
-            edgecolors="none",
-        )
+        t_plot = lat_time_rel[lat_plot]
+        e_plot = lat_energy_mev[lat_plot]
+        if lat_prob is not None and lat_prob.shape == lat_time_rel.shape:
+            p_plot = lat_prob[lat_plot]
+            hi = p_plot > float(lat_prob_threshold)
+            lo = ~hi
+            e_pos = e_plot[e_plot > 0]
+            if e_pos.size:
+                vmin_e = float(max(lat_emin_mev, e_pos.min()))
+                vmax_e = float(e_pos.max())
+            else:
+                vmin_e = float(lat_emin_mev)
+                vmax_e = float(lat_emin_mev) * 10.0
+            norm_e = mcolors.LogNorm(vmin=vmin_e, vmax=max(vmax_e, vmin_e * 1.001))
+            cmap_e = plt.cm.viridis
+            if np.any(hi):
+                ax_e.scatter(
+                    t_plot[hi],
+                    e_plot[hi],
+                    c=e_plot[hi],
+                    cmap=cmap_e,
+                    norm=norm_e,
+                    alpha=0.55,
+                    s=14,
+                    zorder=6,
+                    edgecolors="none",
+                )
+            if np.any(lo):
+                rgba = cmap_e(norm_e(e_plot[lo]))
+                ax_e.scatter(
+                    t_plot[lo],
+                    e_plot[lo],
+                    s=14,
+                    facecolors="none",
+                    edgecolors=rgba,
+                    linewidths=0.9,
+                    alpha=0.75,
+                    zorder=5,
+                )
+        else:
+            ax_e.scatter(
+                t_plot,
+                e_plot,
+                c=e_plot,
+                norm="log",
+                alpha=0.55,
+                s=14,
+                zorder=5,
+                edgecolors="none",
+            )
         ax_e.set_yscale("log")
         if lat_emin_mev > 0:
             ax_e.set_ylim(bottom=lat_emin_mev)
