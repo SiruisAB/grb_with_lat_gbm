@@ -192,7 +192,7 @@ def run_lat_extended_three_ml_pipeline(
             bn_dir, bn_name, extended_data_dir
         )
 
-        _makeDatasetsOutOfLATdata(
+        _, eboundsFilename, _, cspecfile = _makeDatasetsOutOfLATdata(
             ft1_file,
             ft2_file,
             bn_name,

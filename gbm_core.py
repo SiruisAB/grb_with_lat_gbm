@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""GBM 时间窗、本底、探测器选择与单探测器插件构建。"""
+"""GBM 时间窗、本底与单探测器插件构建；探测器几何选择见 :mod:`gbm_detector_selection`。"""
 
 from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from astropy.io import fits as pyfits
 from threeML import OGIPLike, TimeSeriesBuilder
 
 from .io_utils import find_files
@@ -89,41 +88,6 @@ def _build_background_interval_string(row: pd.Series, bnname: str) -> str:
         background_interval = "-23.960--2.080,75-100,140-160"
 
     return background_interval
-
-# 选择GBM探测器
-def _select_gbm_detectors(grb_dir: str) -> Tuple[List[str], float, float, float, float]:
-    trig = pyfits.open(
-        next(f for f in find_files(grb_dir, ".fit") if "trigdat_all" in f)
-    )
-    rsp_file = find_files(grb_dir, ".rsp2")[0]
-
-    ra_scx, dec_scx = trig[0].header["RA_SCX"], trig[0].header["DEC_SCX"]
-    ra_scz, dec_scz = trig[0].header["RA_SCZ"], trig[0].header["DEC_SCZ"]
-
-    ra_obj = pyfits.getval(
-        rsp_file,
-        "RA_OBJ",
-        extname="SPECRESP MATRIX",
-        extver=1,
-    )
-    dec_obj = pyfits.getval(
-        rsp_file,
-        "DEC_OBJ",
-        extname="SPECRESP MATRIX",
-        extver=1,
-    )
-
-    import gbm_selector
-
-    dets = gbm_selector.select_best_detectors(
-        ra_scx,
-        dec_scx,
-        ra_scz,
-        dec_scz,
-        ra_obj,
-        dec_obj,
-    )
-    return dets, ra_scx, dec_scx, ra_scz, dec_scz
 
 
 def _build_gbm_plugin_for_detector(

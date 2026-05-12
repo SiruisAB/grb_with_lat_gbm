@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-GBM（TTE）+ LAT（FT1 EVENTS）联合光变示意绘图。
+GBM（TTE）+ LAT 联合光变示意绘图。
 
 由 ``plot_lightcurves.py`` 迁入：多 NaI 能段平均率、BGO、LAT 直方图与能量散点；
 源/本底时间窗与 threeML ``TimeSeriesBuilder`` 一致。
+LAT 子图仅使用 ``lat_extended_three_ml`` 产出的 ``interval*/gll_ft1_tr_bn*_v00_filt_prob.fit``
+（含 GRB 概率列），不再读取 Extended 下的 ``L*EV00.fits``。
 """
 
 from __future__ import annotations
@@ -22,10 +24,10 @@ from threeML import TimeSeriesBuilder
 from threeML.config.config import threeML_config
 from threeML.io.plotting.step_plot import step_plot
 
+from .gbm_detector_selection import select_gbm_detectors
 from .runtime_env import ensure_analysis_runtime
 from .session import session
-
-DEFAULT_LAT_EXTENDED_ROOT = "/home/mxr/lee/data/fermilat/Extended_data_ex"
+from .logging_utils import log
 
 TITLE_BOX = dict(
     boxstyle="round,pad=0.35",
@@ -49,8 +51,8 @@ def parse_background_interval_tuple(background_interval: str) -> Tuple[str, ...]
 
 def detectors_for_lightcurve(dets: Sequence[str]) -> Tuple[Tuple[str, str], str]:
     """
-    从 ``gbm_selector`` 返回的探测器列表中取前两个 NaI 与一个 BGO（小写 id）。
-    若仅有一个 NaI，则两个槽位使用同一探测器（平均率退化为单探头曲线）。
+    从 :func:`select_gbm_detectors` / ``gbm_selector`` 返回的探测器列表中取前两个 NaI
+    与一个 BGO（小写 id）。若仅有一个 NaI，则两个槽位使用同一探测器（平均率退化为单探头曲线）。
     """
     nais = [
         str(d).strip().lower()
@@ -95,25 +97,6 @@ def resolve_gbm_tte_rsp(grb_dir: Union[str, Path], det: str) -> Tuple[Path, Path
     if not rsps:
         raise FileNotFoundError(f"{d}: 未找到 glg_cspec_{det}_*.rsp2")
     return ttes[0], rsps[0]
-
-
-def load_lat_ft1_events(
-    lat_dir: Union[str, Path],
-    trigger_met: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    读取 Extended_data_ex 下 FT1（``L*EV00.fits``）EVENTS：
-    返回相对 T0 的时间 [s]、能量 [MeV]。
-    """
-    d = Path(lat_dir)
-    ev_files = sorted(d.glob("L*EV00.fits"))
-    if not ev_files:
-        raise FileNotFoundError(f"未找到 L*EV00.fits：{d}")
-    with fits.open(ev_files[0]) as h:
-        ev = h["EVENTS"].data
-    lat_time_rel = np.asarray(ev["TIME"], dtype=float) - float(trigger_met)
-    lat_energy_mev = np.asarray(ev["ENERGY"], dtype=float)
-    return lat_time_rel, lat_energy_mev
 
 
 def discover_lat_prob_fit_files(result_bn_dir: Union[str, Path]) -> List[Path]:
@@ -342,7 +325,6 @@ def plot_gbm_lat_lightcurve_figure(
     grb_name: Optional[str] = None,
     trigger_met: Optional[float] = None,
     data_dir: Optional[str] = None,
-    lat_extended_root: Optional[str] = None,
     lat_prob_bn_dir: Optional[Union[str, Path]] = None,
     lat_prob_threshold: float = 0.9,
     gbm_start: float = -2.0,
@@ -350,8 +332,8 @@ def plot_gbm_lat_lightcurve_figure(
     gbm_dt: float = 0.1,
     lat_bin_s: float = 2.0,
     lat_emin_mev: float = 100.0,
-    nai_detector_ids: Tuple[str, str] = ("n3", "n7"),
-    bgo_detector_id: str = "b0",
+    nai_detector_ids: Optional[Tuple[str, str]] = None,
+    bgo_detector_id: Optional[str] = None,
     active_interval: str = "0.1-8",
     background_intervals: Sequence[str] = ("-24--5", "350-400"),
     background_unbinned: bool = False,
@@ -369,14 +351,19 @@ def plot_gbm_lat_lightcurve_figure(
     Parameters
     ----------
     include_lat
-        为 False 时仅三幅 GBM 子图，不读取 LAT FT1。
+        为 False 时仅三幅 GBM 子图，不读取 LAT。
     lat_prob_bn_dir
         含 ``interval*/gll_ft1_tr_bn*_v00_filt_prob.fit`` 的目录（与 ``lat_extended_three_ml``
         在 ``{result_root}/{grb_name}/{bn_name}/`` 下产物一致）。默认使用
-        ``session.result_root / grb_name / bnname``；若该目录下无 prob 文件则回退读取
-        Extended_data_ex 的 ``L*EV00.fits``。
+        ``session.result_root / grb_name / bnname``。
+        若该目录下无 prob 文件，则不绘制 LAT 子图（退化为三幅 GBM），并写一条日志提示。
     lat_prob_threshold
-        ``PROB`` 大于该阈值时散点为实心圆，否则为空心圆（仅在使用 ``filt_prob.fit`` 时生效）。
+        ``GRB`` 概率列大于该阈值时散点为实心圆，否则为空心圆。
+    nai_detector_ids, bgo_detector_id
+        若为 ``None``，则与光谱流程一致：在 ``grb_dir`` 下调用
+        :func:`~grb_project.gbm_detector_selection.select_gbm_detectors` 再经
+        :func:`detectors_for_lightcurve` 得到两个 NaI 与一个 BGO。可只覆盖其中一项，未
+        给定的部分仍自动选择。
     out_path
         若给定则 ``savefig``；默认 ``{grb_name}_Lightcurve.png`` 保存在当前工作目录。
     """
@@ -384,6 +371,18 @@ def plot_gbm_lat_lightcurve_figure(
 
     base_data = Path(data_dir or session.data_dir)
     grb_dir = base_data / bnname
+
+    _nai = nai_detector_ids
+    _bgo = bgo_detector_id
+    if _nai is None or _bgo is None:
+        dets, *_ = select_gbm_detectors(str(grb_dir))
+        auto_nai, auto_bgo = detectors_for_lightcurve(dets)
+        if _nai is None:
+            _nai = auto_nai
+        if _bgo is None:
+            _bgo = auto_bgo
+    nai_detector_ids = _nai
+    bgo_detector_id = _bgo
 
     if trigger_met is None or grb_name is None:
         tm, gn = read_trigger_met_and_grb_name(bnname)
@@ -395,6 +394,7 @@ def plot_gbm_lat_lightcurve_figure(
     lat_time_rel: Optional[np.ndarray] = None
     lat_energy_mev: Optional[np.ndarray] = None
     lat_prob: Optional[np.ndarray] = None
+    lat_show_panel = False
     if include_lat:
         prob_base = (
             Path(lat_prob_bn_dir)
@@ -406,10 +406,12 @@ def plot_gbm_lat_lightcurve_figure(
             lat_time_rel, lat_energy_mev, lat_prob = load_lat_ft1_prob_events(
                 prob_files, float(trigger_met)
             )
+            lat_show_panel = True
         else:
-            lat_root = Path(lat_extended_root or DEFAULT_LAT_EXTENDED_ROOT)
-            lat_dir = lat_root / str(grb_name)
-            lat_time_rel, lat_energy_mev = load_lat_ft1_events(lat_dir, float(trigger_met))
+            log(
+                f"{bnname}: 光变 LAT 子图跳过（未在 {prob_base} 找到 "
+                "interval*/gll_ft1_tr_bn*_v00_filt_prob.fit；请先跑 LAT Extended 流水线）"
+            )
 
     ref_tte, _ = resolve_gbm_tte_rsp(grb_dir, nai_detector_ids[0])
 
@@ -434,7 +436,7 @@ def plot_gbm_lat_lightcurve_figure(
     nai_builders = builders
     lat_bins = np.arange(gbm_start, gbm_stop + lat_bin_s, lat_bin_s)
     lat_plot: Optional[np.ndarray] = None
-    if include_lat and lat_time_rel is not None and lat_energy_mev is not None:
+    if lat_show_panel and lat_time_rel is not None and lat_energy_mev is not None:
         lat_win = (lat_time_rel >= gbm_start) & (lat_time_rel <= gbm_stop)
         lat_e_ok = lat_energy_mev >= lat_emin_mev
         lat_plot = lat_win & lat_e_ok
@@ -449,10 +451,10 @@ def plot_gbm_lat_lightcurve_figure(
     else:
         titles_use = titles_default
 
-    n_rows = 4 if include_lat else 3
+    n_rows = 4 if lat_show_panel else 3
     fig_wh = figure_size
     if fig_wh is None:
-        fig_wh = (8.5, 12.0) if include_lat else (8.5, 9.0)
+        fig_wh = (8.5, 12.0) if lat_show_panel else (8.5, 9.0)
 
     fig, axes = plt.subplots(
         n_rows,
@@ -493,7 +495,7 @@ def plot_gbm_lat_lightcurve_figure(
         title=f"BGO {bgo_detector_id}",
     )
 
-    if include_lat and lat_time_rel is not None and lat_energy_mev is not None and lat_plot is not None:
+    if lat_show_panel and lat_time_rel is not None and lat_energy_mev is not None and lat_plot is not None:
         ax_lat = axes[3]
         ax_lat.hist(
             lat_time_rel[lat_plot],
@@ -526,53 +528,41 @@ def plot_gbm_lat_lightcurve_figure(
         ax_e = ax_lat.twinx()
         t_plot = lat_time_rel[lat_plot]
         e_plot = lat_energy_mev[lat_plot]
-        if lat_prob is not None and lat_prob.shape == lat_time_rel.shape:
-            p_plot = lat_prob[lat_plot]
-            hi = p_plot > float(lat_prob_threshold)
-            lo = ~hi
-            e_pos = e_plot[e_plot > 0]
-            if e_pos.size:
-                vmin_e = float(max(lat_emin_mev, e_pos.min()))
-                vmax_e = float(e_pos.max())
-            else:
-                vmin_e = float(lat_emin_mev)
-                vmax_e = float(lat_emin_mev) * 10.0
-            norm_e = mcolors.LogNorm(vmin=vmin_e, vmax=max(vmax_e, vmin_e * 1.001))
-            cmap_e = plt.cm.viridis
-            if np.any(hi):
-                ax_e.scatter(
-                    t_plot[hi],
-                    e_plot[hi],
-                    c=e_plot[hi],
-                    cmap=cmap_e,
-                    norm=norm_e,
-                    alpha=0.55,
-                    s=14,
-                    zorder=6,
-                    edgecolors="none",
-                )
-            if np.any(lo):
-                rgba = cmap_e(norm_e(e_plot[lo]))
-                ax_e.scatter(
-                    t_plot[lo],
-                    e_plot[lo],
-                    s=14,
-                    facecolors="none",
-                    edgecolors=rgba,
-                    linewidths=0.9,
-                    alpha=0.75,
-                    zorder=5,
-                )
+        p_plot = lat_prob[lat_plot]
+        hi = p_plot > float(lat_prob_threshold)
+        lo = ~hi
+        e_pos = e_plot[e_plot > 0]
+        if e_pos.size:
+            vmin_e = float(max(lat_emin_mev, e_pos.min()))
+            vmax_e = float(e_pos.max())
         else:
+            vmin_e = float(lat_emin_mev)
+            vmax_e = float(lat_emin_mev) * 10.0
+        norm_e = mcolors.LogNorm(vmin=vmin_e, vmax=max(vmax_e, vmin_e * 1.001))
+        cmap_e = plt.cm.viridis
+        if np.any(hi):
             ax_e.scatter(
-                t_plot,
-                e_plot,
-                c=e_plot,
-                norm="log",
+                t_plot[hi],
+                e_plot[hi],
+                c=e_plot[hi],
+                cmap=cmap_e,
+                norm=norm_e,
                 alpha=0.55,
                 s=14,
-                zorder=5,
+                zorder=6,
                 edgecolors="none",
+            )
+        if np.any(lo):
+            rgba = cmap_e(norm_e(e_plot[lo]))
+            ax_e.scatter(
+                t_plot[lo],
+                e_plot[lo],
+                s=14,
+                facecolors="none",
+                edgecolors=rgba,
+                linewidths=0.9,
+                alpha=0.75,
+                zorder=5,
             )
         ax_e.set_yscale("log")
         if lat_emin_mev > 0:

@@ -231,12 +231,39 @@ def parse_args() -> argparse.Namespace:
             "analysis_session.log / grb_exceptions.log"
         ),
     )
+    parser.add_argument(
+        "--session-log",
+        action="store_true",
+        help=(
+            "将运行日志追加写入结果目录下的 analysis_session.log；"
+            "异常仍写入 grb_exceptions.log（与 --gcn-all 默认行为一致）"
+        ),
+    )
+    parser.add_argument(
+        "--lat-extended-three-ml",
+        action="store_true",
+        help=(
+            "在每个 GRB 完成复制 Extended 数据并进入结果目录之后、"
+            "在分时间 bin / LAT 插件 / 光变 / GBM 拟合之前，"
+            "运行 LAT Extended + GtBurst + threeML 全流程；需与 --analysis-mode gbm+lat 同用"
+        ),
+    )
     return parser.parse_args()
 
 
 def cli_main() -> None:
     """供 ``python -m grb_project`` 或顶层脚本调用。"""
     args = parse_args()
+
+    lat_ext_ov: Optional[GRBRunOverrides] = None
+    if getattr(args, "lat_extended_three_ml", False):
+        if args.analysis_mode != "gbm+lat":
+            log(
+                "警告: --lat-extended-three-ml 仅在 gbm+lat 模式下运行 LAT Extended 流水线；"
+                f"当前为 {args.analysis_mode!r}，已跳过该流水线。"
+            )
+        else:
+            lat_ext_ov = GRBRunOverrides(lat_three_ml_full=True)
 
     if args.gcn_all and args.grbs:
         print(
@@ -290,11 +317,13 @@ def cli_main() -> None:
             result_root=batch_root,
             summary_csv_name="summary_results3.csv",
             session_log=True,
+            run_overrides=lat_ext_ov,
         )
     else:
         main(
             args.grbs,
             args.analysis_mode,
             result_root=args.result_root,
-            session_log=False,
+            session_log=args.session_log,
+            run_overrides=lat_ext_ov,
         )

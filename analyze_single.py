@@ -20,8 +20,8 @@ from .gbm_core import (
     _build_gbm_plugin_for_detector,
     _determine_time_bins,
     _determine_time_interval_and_position,
-    _select_gbm_detectors,
 )
+from .gbm_detector_selection import select_gbm_detectors
 from .io_utils import (
     _append_text_report,
     copy_extended_lat_to_bn_workspace,
@@ -69,17 +69,6 @@ def analyze_grb(
     )
     bn_workspace = ensure_dir(os.path.join(result_grb_root, bnname))
 
-    if "lat" in analysis_mode.lower() and getattr(
-        session, "copy_extended_lat_to_bn_dir", True
-    ):
-        copy_extended_lat_to_bn_workspace(
-            grb_name,
-            bn_workspace,
-            getattr(session, "extended_lat_data_root", None),
-        )
-
-    os.chdir(result_grb_root)
-
     t0, t1, ra, dec = _determine_time_interval_and_position(
         bnname,
         df_catalog,
@@ -111,6 +100,19 @@ def analyze_grb(
     ) is not None:
         run_lat_three_ml = bool(run_overrides.lat_three_ml_full)
 
+    if "lat" in analysis_mode.lower() and getattr(
+        session, "copy_extended_lat_to_bn_dir", True
+    ):
+        copy_extended_lat_to_bn_workspace(
+            grb_name,
+            bn_workspace,
+            getattr(session, "extended_lat_data_root", None),
+        )
+
+    os.chdir(result_grb_root)
+
+    # LAT Extended + GtBurst + threeML：在复制 Extended、进入结果目录之后，
+    # 在分时间 bin、process_lat_data、光变与 GBM 拟合之前（与 CLI --lat-extended-three-ml 一致）。
     if "lat" in analysis_mode.lower() and run_lat_three_ml:
         try:
             row_lat_sel = df_lat.loc[bnname]
@@ -176,24 +178,30 @@ def analyze_grb(
     time_bins_list = [time_bins]
 
     if bnname == "bn231129799":
-        time_bins_list = [
-            0.10,
-            0.26,
-            0.61,
-            0.85,
-            2.25,
-            2.73,
-            2.90,
-            4.43,
-            5.07,
-            5.75,
-            6.18,
-            6.83,
-            7.21,
-            8.00,
-        ]
-        num_time_bins = len(time_bins_list) - 1
-        duration = time_bins_list[-1] - time_bins_list[0]
+        # 与其它 GRB 一致：time_bins_list 的每个元素是一条 bin 边序列，不是边本身的平铺列表
+        edges_231129 = np.array(
+            # [
+            #     0.10,
+            #     0.26,
+            #     0.61,
+            #     0.85,
+            #     2.25,
+            #     2.73,
+            #     2.90,
+            #     4.43,
+            #     5.07,
+            #     5.75,
+            #     6.18,
+            #     6.83,
+            #     7.21,
+            #     8.00,
+            # ],
+            [0.1,8.0],
+            dtype=float,
+        )
+        time_bins_list = [edges_231129]
+        num_time_bins = len(edges_231129) - 1
+        duration = float(edges_231129[-1] - edges_231129[0])
 
     if bnname == "bn250313607":
         time_bins_list = [
@@ -226,7 +234,7 @@ def analyze_grb(
         bnname,
     )
 
-    dets, *_ = _select_gbm_detectors(grb_dir)
+    dets, *_ = select_gbm_detectors(grb_dir)
     log(f"{bnname}: 探测器 {dets}")
 
     try:
@@ -304,8 +312,8 @@ def analyze_grb(
 
             for model_str in [
                 "band",
-                "blackbody",
-                "band+bb",
+                # "blackbody",
+                # "band+bb",
             ]:
                 result_dir = ensure_dir(
                     os.path.join(session.result_root, grb_name, model_str)

@@ -90,6 +90,24 @@ def ensure_dir(path: str) -> str:
     return path
 
 
+def _gll_basename_for_extended_lat_copy(fname: str, bn_name: str) -> str | None:
+    """
+    若 ``fname`` 为 Extended 常见命名 ``L*EV00.(fits|fit)`` / ``L*SC00.(fits|fit)``，返回
+    ``lat_extended_three_ml._resolve_ft_paths`` 与 threeML ``make_LAT_dataset`` 所期望的
+    ``gll_ft1_tr_{bn}_v00.fit`` / ``gll_ft2_tr_{bn}_v00.fit`` 基名；否则返回 ``None``。
+    """
+    if not fname.startswith("L"):
+        return None
+    low = fname.lower()
+    if not low.endswith((".fits", ".fit")):
+        return None
+    if "ev00" in low:
+        return f"gll_ft1_tr_{bn_name}_v00.fit"
+    if "sc00" in low:
+        return f"gll_ft2_tr_{bn_name}_v00.fit"
+    return None
+
+
 def copy_extended_lat_to_bn_workspace(
     grb_name: str,
     dest_bn_dir: str,
@@ -114,6 +132,7 @@ def copy_extended_lat_to_bn_workspace(
         return False
 
     ensure_dir(dest_bn_dir)
+    bn_name = os.path.basename(os.path.normpath(dest_bn_dir))
     n = 0
     for name in os.listdir(src):
         sp = os.path.join(src, name)
@@ -121,6 +140,11 @@ def copy_extended_lat_to_bn_workspace(
         if os.path.isfile(sp):
             shutil.copy2(sp, dp)
             n += 1
+            gll_base = _gll_basename_for_extended_lat_copy(name, bn_name)
+            if gll_base is not None and gll_base != name:
+                new_p = os.path.join(dest_bn_dir, gll_base)
+                os.replace(dp, new_p)
+                log(f"Extended LAT: {name} → {gll_base}")
         elif os.path.isdir(sp):
             if os.path.exists(dp):
                 shutil.rmtree(dp)
