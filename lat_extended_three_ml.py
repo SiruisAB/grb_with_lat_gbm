@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Dict, Iterator, Optional
@@ -36,6 +37,10 @@ from threeML.utils.data_download.Fermi_LAT.download_LAT_data import LAT_dataset
 from GtBurst.dataHandling import _makeDatasetsOutOfLATdata
 
 from .logging_utils import log
+from .runtime_env import ensure_analysis_runtime
+
+# 相对 ``analyze_single`` 的 ``[t0,t1]``，LAT 流水线在时间轴两侧各多取的秒数（建库 / 分档等）
+_LAT_PIPELINE_TIME_PAD_S = 5.0
 
 
 @contextlib.contextmanager
@@ -47,6 +52,28 @@ def _working_directory(path: str) -> Iterator[None]:
         yield
     finally:
         os.chdir(prev)
+
+
+@contextlib.contextmanager
+def _silence_process_stdio() -> Iterator[None]:
+    """屏蔽标准输出/错误（含子进程继承的 fd），用于 ``extract_events`` 等嘈杂步骤。"""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_out = os.dup(1)
+    saved_err = os.dup(2)
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        os.close(devnull_fd)
 
 
 def _resolve_ft_paths(
@@ -177,16 +204,33 @@ def run_lat_extended_three_ml_pipeline(
     :param bn_name: GBM 触发名，如 ``bn231129799``
     :param grb_name: GCN 名，如 ``GRB231129C``
     :param selection: 须含 tstart, tstop, ra, dec, trigger_time；可选 irfs, data_type, Emin, Emax。
-        其中 **tstart/tstop** 应与 ``analyze_single`` 里最终采用的 **t0/t1**（相对触发，秒）一致。
-    :param result_parent: ``LAT_dataset.make_LAT_dataset`` 的 destination_directory（一般为 ``…/{grb_name}``）
+        其中 **tstart/tstop** 为 ``analyze_single`` 的 **t0/t1**（相对触发，秒）；本函数会在其两侧各扩展
+        ``_LAT_PIPELINE_TIME_PAD_S`` 秒用于 LAT 建库与分段时间轴，统计与图中绿色带仍对应原始
+        ``[tstart, tstop]``。
+    :param result_parent: ``LAT_dataset.make_LAT_dataset`` 的 destination_directory（一般为 ``…/{grb_name}``）。
+        GtBurst / ``TransientLATDataBuilder`` 会在其下查找 ``{result_parent}/{bn_name}/``（例如
+        ``…/GRB231129C/bn231129799/``），故 **不可** 把 ``datarepository`` 设为当前工作目录 ``bn_dir``。
     :param extended_data_dir: 复制前的 Extended 目录 ``…/Extended_data_ex/{grb_name}``
     """
+    ensure_analysis_runtime()
     update_logging_level("INFO")
 
     result_data: Dict[str, Any] = {}
 
     with _working_directory(bn_dir):
         os.makedirs(bn_dir, exist_ok=True)
+        # GtBurst：join(datarepository, bn_name, …)；cwd 为 bn_dir 时不可用 "."。
+        gtburst_data_repository = os.path.abspath(result_parent)
+
+        t0_core = float(selection["tstart"])
+        t1_core = float(selection["tstop"])
+        t0_lat = t0_core - _LAT_PIPELINE_TIME_PAD_S
+        t1_lat = t1_core + _LAT_PIPELINE_TIME_PAD_S
+        log(
+            "LAT 时间轴：analyze_single [t0,t1] "
+            f"[{t0_core:g}, {t1_core:g}] s → 流水线扩展 ±{_LAT_PIPELINE_TIME_PAD_S:g} s 为 "
+            f"[{t0_lat:g}, {t1_lat:g}] s（相对触发）"
+        )
 
         ft1_file, ft2_file = _resolve_ft_paths(
             bn_dir, bn_name, extended_data_dir
@@ -196,8 +240,8 @@ def run_lat_extended_three_ml_pipeline(
             ft1_file,
             ft2_file,
             bn_name,
-            selection["tstart"],
-            selection["tstop"],
+            t0_lat,
+            t1_lat,
             selection["ra"],
             selection["dec"],
             selection["trigger_time"],
@@ -210,8 +254,8 @@ def run_lat_extended_three_ml_pipeline(
             selection["dec"],
             12,
             selection["trigger_time"],
-            selection["tstart"],
-            selection["tstop"],
+            t0_lat,
+            t1_lat,
             selection.get("data_type", "Extended"),
             result_parent,
             float(selection.get("Emin", 100.0)),
@@ -234,9 +278,10 @@ def run_lat_extended_three_ml_pipeline(
 
         for zmax_i in range(100, 106):
             for roi_i in range(1, 13):
-                my_lat.extract_events(
-                    roi_i, zmax_i, irfs_sel, thetamax, strategy=strategy
-                )
+                with _silence_process_stdio():
+                    my_lat.extract_events(
+                        roi_i, zmax_i, irfs_sel, thetamax, strategy=strategy
+                    )
                 n_ev = my_lat.nEvents
                 results_scan.append(
                     {"zmax": zmax_i, "roi": roi_i, "nEvents": n_ev}
@@ -249,9 +294,10 @@ def run_lat_extended_three_ml_pipeline(
             raise RuntimeError("LAT extract_events 扫描未得到有效组合")
 
         roi, zmax = best_combo
-        my_lat.extract_events(
-            roi, zmax, irfs_sel, thetamax, strategy=strategy
-        )
+        with _silence_process_stdio():
+            my_lat.extract_events(
+                roi, zmax, irfs_sel, thetamax, strategy=strategy
+            )
 
         result_data["roi"] = roi
         result_data["zmax"] = zmax
@@ -265,9 +311,14 @@ def run_lat_extended_three_ml_pipeline(
             lat_events = event_file["EVENTS"].data
         event_times = lat_events["TIME"] - float(selection["trigger_time"])
 
-        # 与 analyze_single 中 t0、t1 完全一致的分析窗（selection 由该流程填入）
-        t0_analysis = float(selection["tstart"])
-        t1_analysis = float(selection["tstop"])
+        # 与 analyze_single 中 t0、t1 完全一致的核心分析窗（图中绿色带、窗内统计）
+        t0_analysis = t0_core
+        t1_analysis = t1_core
+        result_data["analyze_single_t0_s"] = t0_core
+        result_data["analyze_single_t1_s"] = t1_core
+        result_data["lat_pipeline_t0_s"] = t0_lat
+        result_data["lat_pipeline_t1_s"] = t1_lat
+        result_data["lat_pipeline_pad_each_side_s"] = _LAT_PIPELINE_TIME_PAD_S
         energies_arr = np.asarray(lat_events["ENERGY"], dtype=float)
         win_stats = _analyze_gbm_aligned_time_window(
             np.asarray(event_times, dtype=float),
@@ -279,11 +330,11 @@ def run_lat_extended_three_ml_pipeline(
 
         tstart_ev = max(
             float(np.min(event_times)) - 15.0,
-            t0_analysis,
+            t0_lat,
         )
         tstop_ev = min(
             float(np.max(event_times)) + 15.0,
-            t1_analysis,
+            t1_lat,
         )
 
         bin_width_s = 2.0
@@ -297,13 +348,22 @@ def run_lat_extended_three_ml_pipeline(
         import matplotlib.pyplot as plt
 
         fig, axs = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
+        _pad_lab = f"LAT pipeline ±{_LAT_PIPELINE_TIME_PAD_S:g}s"
         for ax in axs:
+            ax.axvspan(
+                t0_lat,
+                t1_lat,
+                alpha=0.12,
+                color="tab:orange",
+                zorder=0,
+                label=_pad_lab,
+            )
             ax.axvspan(
                 t0_analysis,
                 t1_analysis,
                 alpha=0.22,
                 color="tab:green",
-                zorder=0,
+                zorder=1,
                 label="analyze_single [t0,t1]",
             )
         axs[0].hist(
@@ -334,11 +394,11 @@ def run_lat_extended_three_ml_pipeline(
         fig.savefig("events.png")
         plt.close(fig)
 
-        # 仅聚焦与 analyze_single 相同的 [t0,t1] 附近的可视化
-        dur = max(t1_analysis - t0_analysis, 1e-6)
-        pad = max(0.05 * dur, 1.0)
-        x0_win = t0_analysis - pad
-        x1_win = t1_analysis + pad
+        # 聚焦扩展后的 LAT 窗附近（含 ±pad），核心 [t0,t1] 仍以绿色标出
+        dur_ext = max(t1_lat - t0_lat, 1e-6)
+        pad_ext = max(0.05 * dur_ext, 1.0)
+        x0_win = t0_lat - pad_ext
+        x1_win = t1_lat + pad_ext
         et = np.asarray(event_times, dtype=float)
         mask_w = (et >= x0_win) & (et <= x1_win)
         tw = et[mask_w]
@@ -348,11 +408,18 @@ def run_lat_extended_three_ml_pipeline(
         fig_w, axw = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
         for ax in axw:
             ax.axvspan(
+                t0_lat,
+                t1_lat,
+                alpha=0.12,
+                color="tab:orange",
+                zorder=0,
+            )
+            ax.axvspan(
                 t0_analysis,
                 t1_analysis,
                 alpha=0.22,
                 color="tab:green",
-                zorder=0,
+                zorder=1,
             )
         if tw.size:
             axw[0].hist(tw, bins=bins_w, histtype="stepfilled", alpha=0.3, color="C0")
@@ -368,8 +435,10 @@ def run_lat_extended_three_ml_pipeline(
             )
         axw[0].set_ylabel("Events")
         axw[0].set_title(
-            "LAT vs analyze_single time window "
-            f"[t0,t1]=[{t0_analysis:g},{t1_analysis:g}] s (relative to trigger)"
+            "LAT: core [t0,t1] "
+            f"[{t0_analysis:g},{t1_analysis:g}] s; pipeline "
+            f"±{_LAT_PIPELINE_TIME_PAD_S:g}s → "
+            f"[{t0_lat:g},{t1_lat:g}] s (relative to trigger)"
         )
         axw[1].set_yscale("log")
         axw[1].set_ylabel("Energy [MeV]")
@@ -401,7 +470,7 @@ def run_lat_extended_three_ml_pipeline(
                 zmax=float(zmax),
                 galactic_model="template",
                 particle_model="isotr template",
-                datarepository=".",
+                datarepository=gtburst_data_repository,
             )
             builder_transient.display(get=True)
             obs_transient = builder_transient.run(
@@ -441,7 +510,7 @@ def run_lat_extended_three_ml_pipeline(
                 zmax=float(zmax),
                 galactic_model="template",
                 particle_model="isotr template",
-                datarepository=".",
+                datarepository=gtburst_data_repository,
             )
             builder_seg.display(get=True)
             obs_seg = builder_seg.run(include_previous_intervals=False)
@@ -462,7 +531,7 @@ def run_lat_extended_three_ml_pipeline(
             zmax=float(zmax),
             galactic_model="template",
             particle_model="isotr template",
-            datarepository=".",
+            datarepository=gtburst_data_repository,
         )
         builder_all.display(get=True)
         builder_all.run(include_previous_intervals=False)
