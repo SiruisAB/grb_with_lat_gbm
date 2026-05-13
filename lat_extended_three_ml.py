@@ -506,7 +506,7 @@ def run_lat_extended_three_ml_pipeline(
                 roi=float(roi),
                 tstarts=t1_e,
                 tstops=t2_e,
-                irf="p8_source",
+                irf="p8_transient010e",#p8_source
                 zmax=float(zmax),
                 galactic_model="template",
                 particle_model="isotr template",
@@ -527,7 +527,7 @@ def run_lat_extended_three_ml_pipeline(
             roi=float(roi),
             tstarts=f"{tstart_ev:.1f}",
             tstops=f"{tstop_ev:.1f}",
-            irf="p8_source",
+            irf="p8_transient010e",#p8_transient010e，p8_source
             zmax=float(zmax),
             galactic_model="template",
             particle_model="isotr template",

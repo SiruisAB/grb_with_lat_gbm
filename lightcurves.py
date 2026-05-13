@@ -358,7 +358,9 @@ def plot_gbm_lat_lightcurve_figure(
         ``session.result_root / grb_name / bnname``。
         若该目录下无 prob 文件，则不绘制 LAT 子图（退化为三幅 GBM），并写一条日志提示。
     lat_prob_threshold
-        ``GRB`` 概率列大于该阈值时散点为实心圆，否则为空心圆。
+        ``GRB`` 概率列大于该阈值时散点为实心圆；否则为略大、加粗、略压暗的 viridis
+        描边空心圆（仍按能量上色），便于与实心点区分。严格小于该阈值的空心点旁
+        标注概率（两位小数）。
     nai_detector_ids, bgo_detector_id
         若为 ``None``，则与光谱流程一致：在 ``grb_dir`` 下调用
         :func:`~grb_project.gbm_detector_selection.select_gbm_detectors` 再经
@@ -553,17 +555,43 @@ def plot_gbm_lat_lightcurve_figure(
                 edgecolors="none",
             )
         if np.any(lo):
-            rgba = cmap_e(norm_e(e_plot[lo]))
+            # 空心点：略放大 + 加粗描边，并把 viridis 边色向深色压一点，便于在浅色直方底上看清，
+            # 仍用边线色相区分能量（与实心点同一 colormap）。
+            ce = np.asarray(cmap_e(norm_e(e_plot[lo])), dtype=float)
+            if ce.ndim == 1:
+                ce = ce.reshape(1, -1)
+            edge_rgba = ce.copy()
+            edge_rgba[:, :3] = np.clip(0.52 * ce[:, :3] + 0.48 * 0.1, 0.0, 1.0)
+            edge_rgba[:, 3] = np.clip(ce[:, 3] * 0.85 + 0.2, 0.72, 1.0)
             ax_e.scatter(
                 t_plot[lo],
                 e_plot[lo],
-                s=14,
+                s=22,
                 facecolors="none",
-                edgecolors=rgba,
-                linewidths=0.9,
-                alpha=0.75,
+                edgecolors=edge_rgba,
+                linewidths=1.85,
+                alpha=1.0,
                 zorder=5,
             )
+        ann_lo = p_plot < float(lat_prob_threshold)
+        if np.any(ann_lo):
+            for _t, _e, _p in zip(
+                t_plot[ann_lo],
+                e_plot[ann_lo],
+                p_plot[ann_lo],
+            ):
+                ax_e.annotate(
+                    f"{float(_p):.2f}",
+                    (_t, _e),
+                    xytext=(4, 4),
+                    textcoords="offset points",
+                    fontsize=7.5,
+                    ha="left",
+                    va="bottom",
+                    color="0.12",
+                    zorder=8,
+                    clip_on=True,
+                )
         ax_e.set_yscale("log")
         if lat_emin_mev > 0:
             ax_e.set_ylim(bottom=lat_emin_mev)
