@@ -196,7 +196,7 @@ def analyze_grb(
             #     7.21,
             #     8.00,
             # ],
-            [0.1,8.0],
+            [0.1,1,3,4.5,6.2,8.5],
             dtype=float,
         )
         time_bins_list = [edges_231129]
@@ -237,42 +237,49 @@ def analyze_grb(
     dets, *_ = select_gbm_detectors(grb_dir)
     log(f"{bnname}: 探测器 {dets}")
 
-    try:
-        from .lightcurves import (
-            detectors_for_lightcurve,
-            parse_background_interval_tuple,
-            plot_gbm_lat_lightcurve_figure,
-        )
+    skip_joint_lc = (
+        run_overrides is not None
+        and getattr(run_overrides, "plot_joint_lightcurve", None) is False
+    )
+    if skip_joint_lc:
+        log(f"{bnname}: 已跳过联合光变图（plot_joint_lightcurve=False）")
+    else:
+        try:
+            from .lightcurves import (
+                detectors_for_lightcurve,
+                parse_background_interval_tuple,
+                plot_gbm_lat_lightcurve_figure,
+            )
 
-        nai_pair, bgo_id = detectors_for_lightcurve(dets)
-        bkg_parts = parse_background_interval_tuple(background_interval)
-        gbm_lc_start = float(t0) - 5.0
-        gbm_lc_stop = float(t1) + 5.0
-        active_lc = f"{float(t0):.6g}-{float(t1):.6g}"
-        include_lat_panel = (
-            "lat" in analysis_mode.lower() and lat_plugin is not None
-        )
-        out_lc = os.path.join(
-            session.result_root,
-            grb_name,
-            f"{bnname}_lightcurve.png",
-        )
-        plot_gbm_lat_lightcurve_figure(
-            bnname,
-            grb_name=grb_name,
-            trigger_met=None,
-            gbm_start=gbm_lc_start,
-            gbm_stop=gbm_lc_stop,
-            nai_detector_ids=nai_pair,
-            bgo_detector_id=bgo_id,
-            active_interval=active_lc,
-            background_intervals=bkg_parts,
-            include_lat=include_lat_panel,
-            out_path=out_lc,
-        )
-        log(f"{bnname}: 光变曲线已保存 {out_lc}")
-    except Exception as exc:  # noqa: BLE001
-        log(f"{bnname}: 光变曲线绘制跳过 ({exc})")
+            nai_pair, bgo_id = detectors_for_lightcurve(dets)
+            bkg_parts = parse_background_interval_tuple(background_interval)
+            gbm_lc_start = float(t0) - 5.0
+            gbm_lc_stop = float(t1) + 5.0
+            active_lc = f"{float(t0):.6g}-{float(t1):.6g}"
+            include_lat_panel = (
+                "lat" in analysis_mode.lower() and lat_plugin is not None
+            )
+            out_lc = os.path.join(
+                session.result_root,
+                grb_name,
+                f"{bnname}_lightcurve.png",
+            )
+            plot_gbm_lat_lightcurve_figure(
+                bnname,
+                grb_name=grb_name,
+                trigger_met=None,
+                gbm_start=gbm_lc_start,
+                gbm_stop=gbm_lc_stop,
+                nai_detector_ids=nai_pair,
+                bgo_detector_id=bgo_id,
+                active_interval=active_lc,
+                background_intervals=bkg_parts,
+                include_lat=include_lat_panel,
+                out_path=out_lc,
+            )
+            log(f"{bnname}: 光变曲线已保存 {out_lc}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"{bnname}: 光变曲线绘制跳过 ({exc})")
 
     bin_counter = 0
     for tb in time_bins_list:
@@ -312,8 +319,12 @@ def analyze_grb(
 
             for model_str in [
                 "band",
-                # "blackbody",
-                # "band+bb",
+                "blackbody",
+                "band+bb",
+                "comp",
+                "comp+bb",
+                "band+pl",
+                "comp+pl",
             ]:
                 result_dir = ensure_dir(
                     os.path.join(session.result_root, grb_name, model_str)

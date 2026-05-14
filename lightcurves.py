@@ -338,6 +338,8 @@ def plot_gbm_lat_lightcurve_figure(
     background_intervals: Sequence[str] = ("-24--5", "350-400"),
     background_unbinned: bool = False,
     bands_kev: Sequence[Tuple[float, float]] = ((8.0, 50.0), (50.0, 300.0)),
+    nai_bands_kev: Optional[Sequence[Tuple[float, float]]] = None,
+    bgo_band_kev: Tuple[float, float] = (300.0, 38000.0),
     band_titles: Optional[Sequence[str]] = None,
     out_path: Optional[Union[str, Path]] = None,
     figure_size: Optional[Tuple[float, float]] = None,
@@ -366,6 +368,11 @@ def plot_gbm_lat_lightcurve_figure(
         :func:`~grb_project.gbm_detector_selection.select_gbm_detectors` 再经
         :func:`detectors_for_lightcurve` 得到两个 NaI 与一个 BGO。可只覆盖其中一项，未
         给定的部分仍自动选择。
+    bands_kev, nai_bands_kev
+        前两幅子图为各 NaI 能段的平均率；``bands_kev`` 为默认 NaI 能段列表。
+        若显式传入 ``nai_bands_kev``，则以其覆盖 ``bands_kev``（便于单独配置 NaI）。
+    bgo_band_kev
+        BGO 子图能量范围 [keV]，由 TTE 的 EBOUNDS 映射为道址；默认 ``(300, 38000)``。
     out_path
         若给定则 ``savefig``；默认 ``{grb_name}_Lightcurve.png`` 保存在当前工作目录。
     """
@@ -431,6 +438,16 @@ def plot_gbm_lat_lightcurve_figure(
         rsp_file=str(tb_bgo_rsp),
     )
 
+    nai_kev_bands: Sequence[Tuple[float, float]] = (
+        tuple((float(lo), float(hi)) for lo, hi in nai_bands_kev)
+        if nai_bands_kev is not None
+        else tuple((float(lo), float(hi)) for lo, hi in bands_kev)
+    )
+    bgo_lo, bgo_hi = float(bgo_band_kev[0]), float(bgo_band_kev[1])
+    if bgo_lo >= bgo_hi:
+        raise ValueError(f"bgo_band_kev 须满足 emin < emax，当前为 {bgo_band_kev!r}")
+    bgo_es, bgo_ee = kev_band_to_echan(tb_bgo_tte, bgo_lo, bgo_hi)
+
     for tsb in (*builders, bgo_b):
         tsb.set_active_time_interval(active_interval)
         tsb.set_background_interval(*background_intervals, unbinned=background_unbinned)
@@ -444,12 +461,12 @@ def plot_gbm_lat_lightcurve_figure(
         lat_plot = lat_win & lat_e_ok
 
     titles_default = tuple(
-        f"NaI({lo:g}–{hi:g} keV)" for lo, hi in bands_kev
+        f"NaI({lo:g}–{hi:g} keV)" for lo, hi in nai_kev_bands
     )
     if band_titles is not None:
         titles_use = tuple(band_titles)
-        if len(titles_use) != len(bands_kev):
-            raise ValueError("band_titles 长度须与 bands_kev 一致")
+        if len(titles_use) != len(nai_kev_bands):
+            raise ValueError("band_titles 长度须与 NaI 能段条数一致（与 nai_bands_kev 或 bands_kev）")
     else:
         titles_use = titles_default
 
@@ -473,7 +490,7 @@ def plot_gbm_lat_lightcurve_figure(
             _s.set_visible(True)
             _s.set_linewidth(0.9)
 
-    for ax, (elo, ehi), ttl in zip(axes[:2], bands_kev, titles_use):
+    for ax, (elo, ehi), ttl in zip(axes[:2], nai_kev_bands, titles_use):
         es, ee = kev_band_to_echan(ref_tte, elo, ehi)
         plot_mean_lightcurve_on_ax(
             nai_builders,
@@ -492,9 +509,9 @@ def plot_gbm_lat_lightcurve_figure(
         start=gbm_start,
         stop=gbm_stop,
         dt=gbm_dt,
-        use_echans_start=0,
-        use_echans_stop=-1,
-        title=f"BGO {bgo_detector_id}",
+        use_echans_start=bgo_es,
+        use_echans_stop=bgo_ee,
+        title=f"BGO {bgo_detector_id} ({bgo_lo:g}–{bgo_hi:g} keV)",
     )
 
     if lat_show_panel and lat_time_rel is not None and lat_energy_mev is not None and lat_plot is not None:

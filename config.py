@@ -13,6 +13,7 @@ class GRBProjectConfig:
     工程级默认路径与分析选项；可在实例化后逐项赋值，再调用 GRBProject.run()。
 
     bnname / grbname / t0 / t1 等设为 None 时表示沿用核心脚本原有逻辑（目录表与 GCN）。
+    plot_joint_lightcurve 为 False 时跳过联合光变图（lightcurves）；None 与 True 为默认绘制。
     """
 
     # --- 数据与目录路径（默认值与原 gbmtest_enhanced1_refactored.py 一致）---
@@ -38,6 +39,7 @@ class GRBProjectConfig:
     ra: Optional[float] = None
     dec: Optional[float] = None
     lat_three_ml_full: Optional[bool] = None
+    plot_joint_lightcurve: Optional[bool] = None
 
 
 @dataclass
@@ -46,6 +48,7 @@ class GRBRunOverrides:
 
     lat_three_ml_full: 为 True/False 时覆盖 session.lat_extended_three_ml_pipeline，
     控制是否运行完整 LAT Extended / GtBurst / threeML 流水线。
+    plot_joint_lightcurve: 为 False 时跳过联合光变图（``lightcurves``）；None 表示沿用默认（绘制）。
     """
 
     grbname: Optional[str] = None
@@ -54,6 +57,7 @@ class GRBRunOverrides:
     ra: Optional[float] = None
     dec: Optional[float] = None
     lat_three_ml_full: Optional[bool] = None
+    plot_joint_lightcurve: Optional[bool] = None
 
     def is_empty(self) -> bool:
         return all(
@@ -65,6 +69,7 @@ class GRBRunOverrides:
                 "ra",
                 "dec",
                 "lat_three_ml_full",
+                "plot_joint_lightcurve",
             )
         )
 
@@ -78,5 +83,6 @@ def run_overrides_from_config(cfg: GRBProjectConfig) -> Optional[GRBRunOverrides
         ra=cfg.ra,
         dec=cfg.dec,
         lat_three_ml_full=cfg.lat_three_ml_full,
+        plot_joint_lightcurve=cfg.plot_joint_lightcurve,
     )
     return None if ov.is_empty() else ov

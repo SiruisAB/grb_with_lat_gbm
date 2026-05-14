@@ -199,5 +199,5 @@ class GRBProject:
             summary_csv_name=summary_csv_name,
             session_log=session_log,
             fixed_num_time_bins=self.config.fixed_num_time_bins,
-            run_overrides=None,
+            run_overrides=run_overrides_from_config(self.config),
         )

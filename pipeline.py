@@ -248,22 +248,54 @@ def parse_args() -> argparse.Namespace:
             "运行 LAT Extended + GtBurst + threeML 全流程；需与 --analysis-mode gbm+lat 同用"
         ),
     )
+    parser.add_argument(
+        "--plot-joint-lightcurve",
+        dest="plot_joint_lightcurve",
+        action="store_true",
+        help="启用 lightcurves 联合光变绘制（默认已启用；通常无需单独指定）",
+    )
+    parser.add_argument(
+        "--no-plot-joint-lightcurve",
+        dest="plot_joint_lightcurve",
+        action="store_false",
+        help=(
+            "关闭联合光变图（不调用 lightcurves.plot_gbm_lat_lightcurve_figure；"
+            "不生成 {grb}/{bn}_lightcurve.png）"
+        ),
+    )
+    parser.set_defaults(plot_joint_lightcurve=True)
     return parser.parse_args()
+
+
+def _cli_run_overrides(args: argparse.Namespace) -> Optional[GRBRunOverrides]:
+    """合并命令行上的 LAT Extended 与联合光变开关为单个 GRBRunOverrides。"""
+    lat_on = (
+        getattr(args, "lat_extended_three_ml", False)
+        and args.analysis_mode == "gbm+lat"
+    )
+    if getattr(args, "lat_extended_three_ml", False) and args.analysis_mode != "gbm+lat":
+        log(
+            "警告: --lat-extended-three-ml 仅在 gbm+lat 模式下运行 LAT Extended 流水线；"
+            f"当前为 {args.analysis_mode!r}，已跳过该流水线。"
+        )
+    lc_on = bool(getattr(args, "plot_joint_lightcurve", True))
+    if lat_on and not lc_on:
+        return GRBRunOverrides(
+            lat_three_ml_full=True,
+            plot_joint_lightcurve=False,
+        )
+    if lat_on:
+        return GRBRunOverrides(lat_three_ml_full=True)
+    if not lc_on:
+        return GRBRunOverrides(plot_joint_lightcurve=False)
+    return None
 
 
 def cli_main() -> None:
     """供 ``python -m grb_project`` 或顶层脚本调用。"""
     args = parse_args()
 
-    lat_ext_ov: Optional[GRBRunOverrides] = None
-    if getattr(args, "lat_extended_three_ml", False):
-        if args.analysis_mode != "gbm+lat":
-            log(
-                "警告: --lat-extended-three-ml 仅在 gbm+lat 模式下运行 LAT Extended 流水线；"
-                f"当前为 {args.analysis_mode!r}，已跳过该流水线。"
-            )
-        else:
-            lat_ext_ov = GRBRunOverrides(lat_three_ml_full=True)
+    cli_ov = _cli_run_overrides(args)
 
     if args.gcn_all and args.grbs:
         print(
@@ -317,7 +349,7 @@ def cli_main() -> None:
             result_root=batch_root,
             summary_csv_name="summary_results3.csv",
             session_log=True,
-            run_overrides=lat_ext_ov,
+            run_overrides=cli_ov,
         )
     else:
         main(
@@ -325,5 +357,5 @@ def cli_main() -> None:
             args.analysis_mode,
             result_root=args.result_root,
             session_log=args.session_log,
-            run_overrides=lat_ext_ov,
+            run_overrides=cli_ov,
         )
