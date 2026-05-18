@@ -197,6 +197,7 @@ def analyze_grb(
             #     8.00,
             # ],
             [0.1,1,3,4.5,6.2,8.5],
+            # [0.1,8],
             dtype=float,
         )
         time_bins_list = [edges_231129]
@@ -325,6 +326,8 @@ def analyze_grb(
                 "comp+bb",
                 "band+pl",
                 "comp+pl",
+                "bb+pl",
+                "mbb",
             ]:
                 result_dir = ensure_dir(
                     os.path.join(session.result_root, grb_name, model_str)

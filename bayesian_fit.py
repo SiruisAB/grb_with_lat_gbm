@@ -54,7 +54,7 @@ def _run_bayesian_analysis_for_model(
 
     bs.set_sampler("dynesty_nested")
     bs.sampler.setup(
-        n_live_points=1000,
+        n_live_points=700,
         bound="multi",
         sample="rslice",
         dlogz=0.1,
