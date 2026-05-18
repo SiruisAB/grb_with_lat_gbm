@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""汇总表后处理：时间 bin 辅助列、最佳模型、TeX/JSON/YAML 导出。"""
+"""汇总表后处理：时间 bin 辅助列、时间 bin 分析、TeX/JSON/YAML 导出。"""
 
 from __future__ import annotations
 
@@ -35,32 +35,11 @@ def _append_time_bin_info(df_summary: pd.DataFrame) -> None:
     )
 
 
-def _compute_best_models_and_time_analysis(
-    df_summary: pd.DataFrame,
-) -> Tuple[List[pd.Series], List[Dict]]:
-    best_models: List[pd.Series] = []
+def _compute_time_bin_analysis(df_summary: pd.DataFrame) -> List[Dict]:
     time_analysis: List[Dict] = []
 
     if df_summary.empty:
-        return best_models, time_analysis
-
-    required_columns = [
-        "bnname",
-        "model",
-        "AIC",
-        "BIC",
-        "log_marginal_likelihood",
-    ]
-    if not all(col in df_summary.columns for col in required_columns):
-        return best_models, time_analysis
-
-    for bnname in df_summary["bnname"].unique():
-        grb_data = df_summary[df_summary["bnname"] == bnname]
-        grb_data = grb_data.copy()
-
-        best_model_idx = grb_data["AIC"].idxmin()
-        best_model_row = grb_data.loc[best_model_idx]
-        best_models.append(best_model_row)
+        return time_analysis
 
     if "bin_start_time" in df_summary.columns:
         time_bin_analysis = (
@@ -82,206 +61,10 @@ def _compute_best_models_and_time_analysis(
         time_bin_analysis.reset_index(inplace=True)
         time_analysis.extend(time_bin_analysis.to_dict("records"))
 
-    return best_models, time_analysis
+    return time_analysis
 
 
-def _extract_burst_time_info(
-    bnname: str,
-) -> Tuple[Optional[float], Optional[float], Optional[float], List[str]]:
-    grb_dir = os.path.join(session.data_dir, str(bnname))
-    intervals: List[Dict] = []
-
-    try:
-        for item in os.listdir(grb_dir):
-            full_path = os.path.join(grb_dir, item)
-            if not os.path.isdir(full_path):
-                continue
-            if not item.startswith("interval"):
-                continue
-
-            time_part = item.replace("interval", "")
-            if "-" not in time_part:
-                continue
-            start_str, end_str = time_part.split("-")
-            try:
-                start_time = float(start_str)
-                end_time = float(end_str)
-            except ValueError:
-                continue
-
-            intervals.append(
-                {
-                    "start": start_time,
-                    "end": end_time,
-                    "duration": end_time - start_time,
-                    "interval_name": item,
-                }
-            )
-    except Exception:
-        pass
-
-    if not intervals:
-        return None, None, None, []
-
-    longest = max(intervals, key=lambda x: x["duration"])
-    burst_start_time = longest["start"]
-    burst_end_time = longest["end"]
-    burst_duration = longest["duration"]
-    interval_names = [interval["interval_name"] for interval in intervals]
-
-    return burst_start_time, burst_end_time, burst_duration, interval_names
-
-
-def _export_best_model_param_tex(combined_row: Dict[str, object]) -> None:
-    grb_name = str(combined_row.get("grb_name", ""))
-    bnname = str(combined_row.get("bnname", ""))
-    best_model = str(
-        combined_row.get("best_model", combined_row.get("model", ""))
-    )
-
-    if not grb_name or not bnname or not best_model:
-        return
-
-    out_dir = Path(session.result_root) / grb_name
-    tex_path = out_dir / f"{bnname}_best_model_params.tex"
-
-    params: List[Tuple[str, object, object]] = []
-    for key, value in combined_row.items():
-        if not isinstance(key, str) or not key.endswith("_value"):
-            continue
-        base = key[: -len("_value")]
-        err_key = base + "_error"
-        if err_key not in combined_row:
-            continue
-        err_val = combined_row.get(err_key)
-
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            continue
-        if err_val is None or (isinstance(err_val, float) and np.isnan(err_val)):
-            continue
-
-        name_raw = base.split(".")[-1]
-        param_name = name_raw
-        params.append((param_name, value, err_val))
-
-    if not params:
-        return
-
-    lines: List[str] = []
-    lines.append(r"\startlongtable")
-    lines.append(r"\begin{deluxetable*}{lcc}")
-    lines.append(
-        "\\tablecaption{Best-fit parameters for %s (%s), model %s\\label{tab:%s_best_params}}"
-        % (grb_name, bnname, best_model, bnname)
-    )
-    lines.append(r"\tablecolumns{3}")
-    lines.append(r"\tablewidth{0pt}")
-    lines.append(r"\tablehead{")
-    lines.append(r"\colhead{Parameter} &")
-    lines.append(r"\colhead{Value} &")
-    lines.append(r"\colhead{Error}")
-    lines.append(r"}")
-    lines.append(r"\startdata")
-
-    for name, val, err in params:
-        if isinstance(val, (int, float)) and not isinstance(val, bool):
-            val_str = f"{val:.4g}"
-        else:
-            val_str = str(val)
-        if isinstance(err, (int, float)) and not isinstance(err, bool):
-            err_str = f"{err:.4g}"
-        else:
-            err_str = str(err)
-
-        lines.append(f"{name} & {val_str} & {err_str} \\\\")
-
-    lines.append(r"\enddata")
-    lines.append(
-        r"\tablecomments{Best-fit spectral parameters for the preferred model."
-        r" Parameter names follow the internal model notation.}"
-    )
-    lines.append(r"\end{deluxetable*}")
-
-    tex_path.write_text("\n".join(lines), encoding="utf-8")
-    log(f"GRB {grb_name} 的最佳模型参数表已保存至 {tex_path}")
-
-
-def _save_best_models_and_time_analysis(
-    df_summary: pd.DataFrame,
-    best_models: List[pd.Series],
-    time_analysis: List[Dict],
-) -> None:
-    combined_results: List[Dict] = []
-
-    for row in pd.DataFrame(best_models).iterrows():
-        _, row_series = row
-        bnname = row_series["bnname"]
-        model = row_series["model"]
-
-        grb_name = None
-        for item in os.listdir(session.result_root):
-            item_path = os.path.join(session.result_root, item)
-            if not os.path.isdir(item_path):
-                continue
-            if bnname in os.listdir(item_path):
-                grb_name = item
-                break
-
-        if not grb_name:
-            continue
-
-        burst_start_time, burst_end_time, burst_duration, interval_names = (
-            _extract_burst_time_info(bnname)
-        )
-
-        combined_row: Dict[str, object] = {
-            "bnname": str(bnname),
-            "grb_name": str(grb_name),
-            "best_model": str(model),
-            "AIC": float(row_series["AIC"]),
-            "BIC": float(row_series["BIC"]),
-            "burst_start_time": burst_start_time or "",
-            "burst_end_time": burst_end_time or "",
-            "burst_duration": burst_duration or "",
-            "intervals": "; ".join(interval_names),
-        }
-        combined_row.update(row_series.to_dict())
-        combined_results.append(combined_row)
-
-    if combined_results:
-        for combined_row in combined_results:
-            grb_name_single = combined_row["grb_name"]
-            bnname_single = combined_row["bnname"]
-            df_single = pd.DataFrame([combined_row])
-            best_models_csv = os.path.join(
-                session.result_root,
-                str(grb_name_single),
-                f"{bnname_single}_best_models.csv",
-            )
-
-            write_header = True
-            if os.path.isfile(best_models_csv):
-                try:
-                    with open(best_models_csv, "r", encoding="utf-8") as f:
-                        first_line = f.readline().strip()
-                        if "bnname" in first_line and "grb_name" in first_line:
-                            write_header = False
-                except Exception:
-                    pass
-
-            df_single.to_csv(
-                best_models_csv,
-                index=False,
-                mode="a",
-                header=write_header,
-            )
-            log(
-                f"GRB {bnname_single} 的最佳模型和时间分析结果已保存至 "
-                f"{best_models_csv}"
-            )
-
-            _export_best_model_param_tex(combined_row)
-
+def _save_time_bin_analysis(time_analysis: List[Dict]) -> None:
     if time_analysis:
         time_analysis_df = pd.DataFrame(time_analysis)
         time_analysis_csv = os.path.join(

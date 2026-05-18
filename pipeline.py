@@ -27,9 +27,9 @@ from .runtime_env import ensure_analysis_runtime
 from .session import export_legacy_aliases, session, set_result_root
 from .summary_export import (
     _append_time_bin_info,
-    _compute_best_models_and_time_analysis,
+    _compute_time_bin_analysis,
     _save_all_models_per_grb,
-    _save_best_models_and_time_analysis,
+    _save_time_bin_analysis,
 )
 
 ensure_analysis_runtime()
@@ -179,10 +179,8 @@ def main(
 
         _append_time_bin_info(df_summary)
 
-        best_models, time_analysis = _compute_best_models_and_time_analysis(
-            df_summary
-        )
-        _save_best_models_and_time_analysis(df_summary, best_models, time_analysis)
+        time_analysis = _compute_time_bin_analysis(df_summary)
+        _save_time_bin_analysis(time_analysis)
 
         _save_all_models_per_grb(df_summary)
 
