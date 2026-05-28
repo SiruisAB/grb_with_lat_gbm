@@ -450,7 +450,7 @@ def plot_gbm_lat_lightcurve_figure(
     gbm_start: float = -2.0,
     gbm_stop: float = 20.0,
     gbm_dt: float = 0.1,
-    lat_bin_s: float = 0.1,
+    lat_bin_s: float = 0.2,
     lat_emin_mev: float = 100.0,
     nai_detector_ids: Optional[Tuple[str, str]] = None,
     bgo_detector_id: Optional[str] = None,
