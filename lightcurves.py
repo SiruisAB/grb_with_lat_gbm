@@ -38,6 +38,53 @@ TITLE_BOX = dict(
 )
 
 
+def _parse_source_interval_pair(interval: str) -> Optional[Tuple[float, float]]:
+    """解析单段源时选段 ``t0-t1``（中间仅一个连字符，如 ``0.1-8``）。"""
+    s = str(interval).strip()
+    if s.count("-") != 1:
+        return None
+    a, b = s.split("-", 1)
+    try:
+        t0, t1 = float(a), float(b)
+    except ValueError:
+        return None
+    if t1 <= t0:
+        return None
+    return t0, t1
+
+
+def resolve_spectral_time_bins_for_lightcurve(
+    bnname: str,
+    active_interval: str,
+    spectral_time_bins: Optional[Sequence[Union[np.ndarray, Sequence[float]]]] = None,
+    fixed_num_time_bins: Optional[int] = None,
+) -> Optional[List[np.ndarray]]:
+    """
+    确定用于光变图分段标注的 bin 边序列。
+
+    若已传入 ``spectral_time_bins`` 则原样返回；否则根据 ``active_interval`` 的
+    ``t0-t1`` 与 :func:`~grb_project.gbm_core._build_time_bins_list` 自动推断
+    （含 ``bn231129799`` 等目录内特例）。总段数 < 2 时返回 ``None``。
+    """
+    if spectral_time_bins is not None:
+        return [np.asarray(tb, dtype=float) for tb in spectral_time_bins]
+    parsed = _parse_source_interval_pair(active_interval)
+    if parsed is None:
+        return None
+    from .gbm_core import _build_time_bins_list
+
+    t0, t1 = parsed
+    tb_list, _, _ = _build_time_bins_list(
+        bnname,
+        t0,
+        t1,
+        fixed_num_time_bins=fixed_num_time_bins,
+    )
+    if len(flatten_spectral_time_segments(tb_list)) < 2:
+        return None
+    return tb_list
+
+
 def parse_background_interval_tuple(background_interval: str) -> Tuple[str, ...]:
     """
     将光谱流程中的本底字符串（逗号分隔段，如 ``-24--5,100-150``）转为
@@ -419,6 +466,7 @@ def plot_gbm_lat_lightcurve_figure(
     dpi: int = 150,
     include_lat: bool = True,
     spectral_time_bins: Optional[Sequence[Union[np.ndarray, Sequence[float]]]] = None,
+    fixed_num_time_bins: Optional[int] = None,
 ) -> Figure:
     """
     绘制光变示意图：两个 NaI 能段均值、BGO；可选第四 panel 为 LAT。
@@ -452,6 +500,10 @@ def plot_gbm_lat_lightcurve_figure(
     spectral_time_bins
         与光谱拟合一致的时间 bin 边序列列表（``_build_time_bins_list`` 的返回值）。
         当总段数 ≥ 2 时，在各 GBM/LAT 子图上画绿色竖直虚线并在段顶标注 a/b/c…。
+        为 ``None`` 时，若 ``active_interval`` 可解析为 ``t0-t1``，则按 ``bnname`` 调用
+        ``_build_time_bins_list`` 自动推断（与 ``analyze_single`` 一致）。
+    fixed_num_time_bins
+        传给 ``_build_time_bins_list`` 的固定分 bin 数；仅影响自动推断分段。
     """
     ensure_analysis_runtime()
 
@@ -696,8 +748,14 @@ def plot_gbm_lat_lightcurve_figure(
 
     shade_active_interval(list(axes), nai_builders[0])
 
-    if spectral_time_bins is not None:
-        annotate_spectral_time_bins(list(axes), spectral_time_bins)
+    bins_to_annotate = resolve_spectral_time_bins_for_lightcurve(
+        bnname,
+        active_interval,
+        spectral_time_bins,
+        fixed_num_time_bins=fixed_num_time_bins,
+    )
+    if bins_to_annotate is not None:
+        annotate_spectral_time_bins(list(axes), bins_to_annotate)
 
     bottom_ax.set_xlabel("Time − T0 [s]")
 
