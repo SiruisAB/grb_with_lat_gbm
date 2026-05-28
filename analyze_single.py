@@ -18,7 +18,7 @@ from .config import GRBRunOverrides
 from .gbm_core import (
     _build_background_interval_string,
     _build_gbm_plugin_for_detector,
-    _determine_time_bins,
+    _build_time_bins_list,
     _determine_time_interval_and_position,
 )
 from .gbm_detector_selection import select_gbm_detectors
@@ -159,6 +159,7 @@ def analyze_grb(
                 selection=selection_lat,
                 result_parent=result_grb_root,
                 extended_data_dir=extended_src,
+                fixed_num_time_bins=fixed_num_time_bins,
             )
         except Exception as exc:  # noqa: BLE001
             log(f"{bnname}: LAT Extended threeML 流水线失败: {exc}")
@@ -169,48 +170,12 @@ def analyze_grb(
                 f"{pd.Timestamp.now()}  {bnname}: {exc}\n{traceback.format_exc()}\n",
             )
 
-    time_bins, num_time_bins, duration = _determine_time_bins(
+    time_bins_list, num_time_bins, duration = _build_time_bins_list(
+        bnname,
         t0,
         t1,
         fixed_num_time_bins=fixed_num_time_bins,
     )
-
-    time_bins_list = [time_bins]
-
-    if bnname == "bn231129799":
-        # 与其它 GRB 一致：time_bins_list 的每个元素是一条 bin 边序列，不是边本身的平铺列表
-        edges_231129 = np.array(
-            # [
-            #     0.10,
-            #     0.26,
-            #     0.61,
-            #     0.85,
-            #     2.25,
-            #     2.73,
-            #     2.90,
-            #     4.43,
-            #     5.07,
-            #     5.75,
-            #     6.18,
-            #     6.83,
-            #     7.21,
-            #     8.00,
-            # ],
-            [0.1,1,3,4.5,6.2,8.5],
-            # [0.1,8],
-            dtype=float,
-        )
-        time_bins_list = [edges_231129]
-        num_time_bins = len(edges_231129) - 1
-        duration = float(edges_231129[-1] - edges_231129[0])
-
-    if bnname == "bn250313607":
-        time_bins_list = [
-            np.array([1.09, 3, 7, 10, 15, 25]),
-            np.array([260, 270, 276, 285, 299]),
-        ]
-        num_time_bins = sum(len(tb) - 1 for tb in time_bins_list)
-        duration = time_bins_list[-1][-1] - time_bins_list[0][0]
 
     lat_plugin: Optional[OGIPLike] = None
     if "lat" in analysis_mode.lower():
@@ -277,6 +242,7 @@ def analyze_grb(
                 background_intervals=bkg_parts,
                 include_lat=include_lat_panel,
                 out_path=out_lc,
+                spectral_time_bins=time_bins_list,
             )
             log(f"{bnname}: 光变曲线已保存 {out_lc}")
         except Exception as exc:  # noqa: BLE001
@@ -326,7 +292,7 @@ def analyze_grb(
                 "comp+bb",
                 "band+pl",
                 "comp+pl",
-                "bb+pl",
+                "pl+bb",
                 "mbb",
             ]:
                 result_dir = ensure_dir(

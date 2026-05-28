@@ -141,6 +141,79 @@ def load_lat_ft1_prob_events(
     )
 
 
+def _spectral_bin_label(index: int) -> str:
+    """第 index 个时间 bin 的标签：0→a, 1→b, …, 25→z, 更大则用序号。"""
+    if index < 26:
+        return chr(ord("a") + index)
+    return str(index + 1)
+
+
+def flatten_spectral_time_segments(
+    time_bins_list: Sequence[Union[np.ndarray, Sequence[float]]],
+) -> List[Tuple[float, float]]:
+    """将 ``_build_time_bins_list`` 的边序列列表展平为若干 ``(tstart, tstop)``。"""
+    segments: List[Tuple[float, float]] = []
+    for tb in time_bins_list:
+        edges = np.asarray(tb, dtype=float).ravel()
+        if edges.size < 2:
+            continue
+        for i in range(len(edges) - 1):
+            t0, t1 = float(edges[i]), float(edges[i + 1])
+            if t1 > t0:
+                segments.append((t0, t1))
+    return segments
+
+
+def annotate_spectral_time_bins(
+    ax_list,
+    time_bins_list: Sequence[Union[np.ndarray, Sequence[float]]],
+    *,
+    line_color: str = "#2e7d32",
+    line_style: str = "--",
+    line_width: float = 0.9,
+    line_alpha: float = 0.78,
+    label_color: str = "#1b5e20",
+    label_y_axes: float = 0.97,
+    min_bins: int = 2,
+) -> int:
+    """
+    在光变子图上用竖直虚线标出光谱分析各时间 bin，并在段顶居中标注 a/b/c…。
+
+    ``time_bins_list`` 与 :func:`~grb_project.gbm_core._build_time_bins_list` 返回值一致。
+    总 bin 数小于 ``min_bins`` 时不绘制（单段无需分割）。
+    返回实际标注的 bin 个数。
+    """
+    segments = flatten_spectral_time_segments(time_bins_list)
+    if len(segments) < min_bins:
+        return 0
+
+    boundaries = sorted({t for t0, t1 in segments for t in (t0, t1)})
+    for ax in ax_list:
+        for t in boundaries:
+            ax.axvline(
+                t,
+                color=line_color,
+                ls=line_style,
+                lw=line_width,
+                alpha=line_alpha,
+                zorder=4,
+            )
+        for idx, (t0, t1) in enumerate(segments):
+            ax.text(
+                0.5 * (t0 + t1),
+                label_y_axes,
+                _spectral_bin_label(idx),
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=10,
+                color=label_color,
+                zorder=5,
+                clip_on=True,
+            )
+    return len(segments)
+
+
 def shade_active_interval(
     ax_list,
     tsb_ref: TimeSeriesBuilder,
@@ -345,6 +418,7 @@ def plot_gbm_lat_lightcurve_figure(
     figure_size: Optional[Tuple[float, float]] = None,
     dpi: int = 150,
     include_lat: bool = True,
+    spectral_time_bins: Optional[Sequence[Union[np.ndarray, Sequence[float]]]] = None,
 ) -> Figure:
     """
     绘制光变示意图：两个 NaI 能段均值、BGO；可选第四 panel 为 LAT。
@@ -375,6 +449,9 @@ def plot_gbm_lat_lightcurve_figure(
         BGO 子图能量范围 [keV]，由 TTE 的 EBOUNDS 映射为道址；默认 ``(300, 38000)``。
     out_path
         若给定则 ``savefig``；默认 ``{grb_name}_Lightcurve.png`` 保存在当前工作目录。
+    spectral_time_bins
+        与光谱拟合一致的时间 bin 边序列列表（``_build_time_bins_list`` 的返回值）。
+        当总段数 ≥ 2 时，在各 GBM/LAT 子图上画绿色竖直虚线并在段顶标注 a/b/c…。
     """
     ensure_analysis_runtime()
 
@@ -618,6 +695,9 @@ def plot_gbm_lat_lightcurve_figure(
         bottom_ax = axes[2]
 
     shade_active_interval(list(axes), nai_builders[0])
+
+    if spectral_time_bins is not None:
+        annotate_spectral_time_bins(list(axes), spectral_time_bins)
 
     bottom_ax.set_xlabel("Time − T0 [s]")
 
