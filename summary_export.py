@@ -75,6 +75,61 @@ def _save_time_bin_analysis(time_analysis: List[Dict]) -> None:
         log(f"时间段分析结果已保存至 {time_analysis_csv}")
 
 
+def _time_bin_csv_tag(bin_start: object, bin_end: object) -> str:
+    """与 separate_spectr 中谱图/LAT 文件后缀一致的时间段标签，如 0.1-1。"""
+    def _fmt_time(t: object) -> str:
+        try:
+            return f"{float(t):.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            return str(t)
+
+    if isinstance(bin_start, (int, float)) and isinstance(bin_end, (int, float)):
+        return f"{_fmt_time(bin_start)}-{_fmt_time(bin_end)}"
+    return ""
+
+
+def _iter_time_bin_groups(
+    df_grb: pd.DataFrame,
+) -> List[Tuple[str, float, float, pd.DataFrame]]:
+    """按时间段拆分 DataFrame，返回 (标签, t_start, t_end, 子表) 列表。"""
+    if df_grb.empty:
+        return []
+
+    has_bin_times = (
+        "bin_start_time" in df_grb.columns and "bin_end_time" in df_grb.columns
+    )
+    if not has_bin_times:
+        return []
+
+    groups: List[Tuple[str, float, float, pd.DataFrame]] = []
+    grouped = df_grb.groupby(["bin_start_time", "bin_end_time"], sort=True)
+    for (t_start, t_end), df_bin in grouped:
+        tag = _time_bin_csv_tag(t_start, t_end)
+        if not tag:
+            continue
+        groups.append((tag, float(t_start), float(t_end), df_bin))
+    return groups
+
+
+def _save_allmodel_csv_per_time_bins(
+    df_grb: pd.DataFrame,
+    grb_dir: str,
+    base_name: str,
+) -> List[str]:
+    """为每个时间段写出 {GRB}_allmodel_{t0}-{t1}.csv。"""
+    written: List[str] = []
+    for tag, _t0, _t1, df_bin in _iter_time_bin_groups(df_grb):
+        bin_csv = os.path.join(grb_dir, f"{base_name}_allmodel_{tag}.csv")
+        df_bin.to_csv(bin_csv, index=False)
+        written.append(bin_csv)
+    if written:
+        log(
+            f"GRB {base_name} 已按时间段写出 {len(written)} 个 allmodel CSV "
+            f"（{written[0]} 等）"
+        )
+    return written
+
+
 def _save_all_models_per_grb(df_summary: pd.DataFrame) -> None:
     if "grb_name" not in df_summary.columns:
         return
@@ -96,9 +151,12 @@ def _save_all_models_per_grb(df_summary: pd.DataFrame) -> None:
             df_grb = df_summary[df_summary["grb_name"] == grb_name_unique]
             grb_dir = os.path.join(session.result_root, str(grb_name_unique))
 
-        safescv = os.path.join(grb_dir, f"{os.path.basename(grb_dir)}_allmodel.csv")
+        base_name = os.path.basename(grb_dir)
+        safescv = os.path.join(grb_dir, f"{base_name}_allmodel.csv")
         df_grb.to_csv(safescv, mode="w", index=False)
-        log(f"GRB {os.path.basename(grb_dir)} 的所有模型结果已保存至 {safescv}")
+        log(f"GRB {base_name} 的所有模型结果已保存至 {safescv}")
+
+        _save_allmodel_csv_per_time_bins(df_grb=df_grb, grb_dir=grb_dir, base_name=base_name)
 
         _export_grb_additional_formats(
             df_grb=df_grb,
@@ -274,19 +332,39 @@ def _export_grb_additional_formats(
             band_tex = r"$8$--$4\times10^{4}$~keV"
         bnname_key = str(sample_meta.get("bnname", ""))
 
+        has_pl_models = False
+        for _tb, _be in bins.items():
+            if not isinstance(_be, dict):
+                continue
+            for _mn in _be:
+                if _mn != "meta" and "pl" in str(_mn).lower():
+                    has_pl_models = True
+                    break
+            if has_pl_models:
+                break
+
+        if has_pl_models:
+            col_spec = r"lccccccccc"
+            n_columns = 10
+        else:
+            col_spec = r"lcccccccc"
+            n_columns = 9
+
         lines.append(r"\startlongtable")
-        lines.append(r"\begin{deluxetable*}{lcccccccc}")
+        lines.append(rf"\begin{{deluxetable*}}{{{col_spec}}}")
         lines.append(
             "\\tablecaption{Spectral fits for %s (%s)\\label{tab:%s_allbins_models}}"
             % (grb_name_key, bnname_key, bnname_key)
         )
-        lines.append(r"\tablecolumns{9}")
+        lines.append(rf"\tablecolumns{{{n_columns}}}")
         lines.append(r"\tablewidth{0pt}")
         lines.append(r"\tablehead{")
         lines.append(r"\colhead{Time bin (s)} &")
         lines.append(r"\colhead{Model} &")
         lines.append(r"\colhead{$\\alpha$} &")
         lines.append(r"\colhead{$\\beta$} &")
+        if has_pl_models:
+            lines.append(r"\colhead{$index$} &")
         lines.append(r"\colhead{$E_{p}/E_{c}$} &")
         lines.append(r"\colhead{$kT$} &")
         lines.append(r"\colhead{$F_{BB}\\times10^{6}$} &")
@@ -296,6 +374,8 @@ def _export_grb_additional_formats(
         lines.append(r"\colhead{} &")
         lines.append(r"\colhead{} &")
         lines.append(r"\colhead{} &")
+        if has_pl_models:
+            lines.append(r"\colhead{} &")
         lines.append(r"\colhead{} &")
         lines.append(r"\colhead{(keV)} &")
         lines.append(r"\colhead{(erg cm$^{-2}$ s$^{-1}$)} &")
@@ -406,7 +486,21 @@ def _export_grb_additional_formats(
                     payload,
                     [
                         ("GRB.spectrum.main.Blackbody.kT_value", "GRB.spectrum.main.Blackbody.kT_error"),
+                        ("GRB.spectrum.main.composite.kT_1_value", "GRB.spectrum.main.composite.kT_1_error"),
                         ("GRB.spectrum.main.composite.kT_2_value", "GRB.spectrum.main.composite.kT_2_error"),
+                    ],
+                )
+                pl_index_v, pl_index_e = _pick_pair(
+                    payload,
+                    [
+                        (
+                            "GRB.spectrum.main.composite.index_2_value",
+                            "GRB.spectrum.main.composite.index_2_error",
+                        ),
+                        (
+                            "GRB.spectrum.main.Powerlaw.index_value",
+                            "GRB.spectrum.main.Powerlaw.index_error",
+                        ),
                     ],
                 )
 
@@ -415,6 +509,9 @@ def _export_grb_additional_formats(
                     "blackbody": "BB",
                     "band+bb": "Band+BB",
                     "comp+bb": "CPL+BB",
+                    "band+pl": "Band+PL",
+                    "comp+pl": "CPL+PL",
+                    "pl+bb": "PL+BB",
                 }.get(model_name, model_name)
 
                 def _fmt_f6(v: object) -> str:
@@ -422,26 +519,38 @@ def _export_grb_additional_formats(
                         return f"{float(v)*1e6:.3f}"
                     return ""
 
-                line = (
-                    f"{bin_label}"
-                    f" & {display_model}"
-                    f" & {_fmt_pm(alpha_v, alpha_e)}"
-                    f" & {_fmt_pm(beta_v, beta_e)}"
-                    f" & {_fmt_pm(epeak_or_ec_v, epeak_or_ec_e)}"
-                    f" & {_fmt_pm(kt_v, kt_e)}"
-                    f" & {_fmt_f6(f_bb)}"
-                    f" & {_fmt_f6(f_tot)}"
-                    f" & {_fmt(bic)}"
-                    r" \\"
+                line_parts = [
+                    bin_label,
+                    display_model,
+                    _fmt_pm(alpha_v, alpha_e),
+                    _fmt_pm(beta_v, beta_e),
+                ]
+                if has_pl_models:
+                    line_parts.append(_fmt_pm(pl_index_v, pl_index_e))
+                line_parts.extend(
+                    [
+                        _fmt_pm(epeak_or_ec_v, epeak_or_ec_e),
+                        _fmt_pm(kt_v, kt_e),
+                        _fmt_f6(f_bb),
+                        _fmt_f6(f_tot),
+                        _fmt(bic),
+                    ]
                 )
-                lines.append(line)
+                lines.append(" & ".join(line_parts) + r" \\")
 
         lines.append(r"\enddata")
-        lines.append(
-            r"\tablecomments{Each row corresponds to one time bin and spectral model; "
+        table_comment = (
+            r"Each row corresponds to one time bin and spectral model; "
             r"$F_{BB}$ is computed from the BB component (if present), and $F_{Tot}$ is the total model flux. "
-            r"The time intervals are relative to the GBM trigger; energy band is %s.}" % band_tex
         )
+        if has_pl_models:
+            table_comment += (
+                r"$index$ is the photon index of the power-law component in composite models. "
+            )
+        table_comment += (
+            r"The time intervals are relative to the GBM trigger; energy band is %s." % band_tex
+        )
+        lines.append(r"\tablecomments{" + table_comment + "}")
         lines.append(r"\end{deluxetable*}")
         lines.append("")
         break
