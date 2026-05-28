@@ -56,7 +56,7 @@ def _run_bayesian_analysis_for_model(
     bs.sampler.setup(
         n_live_points=700,
         bound="multi",
-        sample="rslice",
+        sample="auto",
         dlogz=0.1,
     )
 
