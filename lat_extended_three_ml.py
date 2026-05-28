@@ -38,6 +38,7 @@ from GtBurst.dataHandling import _makeDatasetsOutOfLATdata
 
 from .logging_utils import log
 from .runtime_env import ensure_analysis_runtime
+from .gbm_core import _build_lat_analysis_segments
 
 # 相对 ``analyze_single`` 的 ``[t0,t1]``，LAT 流水线在时间轴两侧各多取的秒数（建库 / 分档等）
 _LAT_PIPELINE_TIME_PAD_S = 5.0
@@ -196,6 +197,7 @@ def run_lat_extended_three_ml_pipeline(
     result_parent: str,
     extended_data_dir: str,
     intervals_count: int = 4,
+    fixed_num_time_bins: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     执行原 ``new.py`` LAT 扩展分析（需在环境中已安装 GtBurst / fermitools）。
@@ -211,6 +213,7 @@ def run_lat_extended_three_ml_pipeline(
         GtBurst / ``TransientLATDataBuilder`` 会在其下查找 ``{result_parent}/{bn_name}/``（例如
         ``…/GRB231129C/bn231129799/``），故 **不可** 把 ``datarepository`` 设为当前工作目录 ``bn_dir``。
     :param extended_data_dir: 复制前的 Extended 目录 ``…/Extended_data_ex/{grb_name}``
+    :param fixed_num_time_bins: 与 ``analyze_single`` 相同；默认 ``None`` 表示整段一个 bin
     """
     ensure_analysis_runtime()
     update_logging_level("INFO")
@@ -342,6 +345,21 @@ def run_lat_extended_three_ml_pipeline(
             tstart_ev, tstop_ev + bin_width_s, bin_width_s
         )
 
+        analysis_segments = _build_lat_analysis_segments(
+            bn_name,
+            t0_core,
+            t1_core,
+            fixed_num_time_bins=fixed_num_time_bins,
+        )
+        log(
+            "LAT 瞬态分析时段（与 analyze_single 一致，另含各段全程）: "
+            + ", ".join(
+                f"[{s['tstart']:g},{s['tstop']:g}] ({s['tag']})"
+                for s in analysis_segments
+            )
+        )
+        result_data["analysis_segments"] = analysis_segments
+
         import matplotlib
 
         matplotlib.use("Agg")
@@ -366,6 +384,24 @@ def run_lat_extended_three_ml_pipeline(
                 zorder=1,
                 label="analyze_single [t0,t1]",
             )
+        for seg in analysis_segments:
+            if seg["tag"].startswith("bin_"):
+                axs[0].axvline(
+                    seg["tstart"],
+                    color="tab:red",
+                    ls=":",
+                    lw=0.8,
+                    alpha=0.45,
+                    zorder=2,
+                )
+                axs[0].axvline(
+                    seg["tstop"],
+                    color="tab:red",
+                    ls=":",
+                    lw=0.8,
+                    alpha=0.45,
+                    zorder=2,
+                )
         axs[0].hist(
             event_times,
             bins=intervals,
@@ -449,64 +485,25 @@ def run_lat_extended_three_ml_pipeline(
         fig_w.savefig("events_analyze_single_window.png", dpi=150)
         plt.close(fig_w)
 
-        tstarts_list: list[str] = []
-        tstops_list: list[str] = []
-        for t0_i, t1_i in zip(intervals[:-1], intervals[1:]):
-            tstarts_list.append(f"{t0_i:.1f}")
-            tstops_list.append(f"{t1_i:.1f}")
-        tstarts_str = ",".join(tstarts_list).replace("-", "\\-")
-        tstops_str = ",".join(tstops_list).replace("-", "\\-")
-
         result_data["T95"] = t95
 
-        if t95 >= tstart_ev:
-            builder_transient = TransientLATDataBuilder(
-                my_lat.grb_name,
-                outfile=f"{my_lat.grb_name}_transient",
-                roi=float(roi),
-                tstarts=f"{tstart_ev:.1f}",
-                tstops=f"{t95:.1f}",
-                irf=irfs_sel,
-                zmax=float(zmax),
-                galactic_model="template",
-                particle_model="isotr template",
-                datarepository=gtburst_data_repository,
-            )
-            builder_transient.display(get=True)
-            obs_transient = builder_transient.run(
-                include_previous_intervals=False
-            )
-        else:
-            log(
-                f"跳过瞬时段分析：t95 ({t95}) < tstart ({tstart_ev})"
-            )
-            obs_transient = []
+        lat_observations: list[list[Any]] = []
+        for seg in analysis_segments:
+            t0_seg = float(seg["tstart"])
+            t1_seg = float(seg["tstop"])
+            tag = str(seg["tag"])
+            if tag.startswith("full") and "block" not in tag:
+                outfile = f"{my_lat.grb_name}_all"
+            else:
+                outfile = f"{my_lat.grb_name}_{tag}"
 
-        iv_c = intervals_count
-        if t95 > tstart_ev:
-            after_edges = np.logspace(
-                np.log10(t95), np.log10(tstop_ev), iv_c - 1
-            )
-        else:
-            after_edges = np.logspace(
-                np.log10(tstart_ev), np.log10(tstop_ev), iv_c
-            )
-            iv_c = iv_c + 1
-
-        source_obs_list = []
-        for _i in range(iv_c - 2):
-            seg_tag = f"after{_i + 1}"
-            t1_e, t2_e = (
-                f"{after_edges[_i]:.1f}",
-                f"{after_edges[_i + 1]:.1f}",
-            )
             builder_seg = TransientLATDataBuilder(
                 my_lat.grb_name,
-                outfile=f"{my_lat.grb_name}_{seg_tag}",
+                outfile=outfile,
                 roi=float(roi),
-                tstarts=t1_e,
-                tstops=t2_e,
-                irf="p8_transient010e",#p8_source
+                tstarts=f"{t0_seg:.1f}",
+                tstops=f"{t1_seg:.1f}",
+                irf=irfs_sel,
                 zmax=float(zmax),
                 galactic_model="template",
                 particle_model="isotr template",
@@ -514,27 +511,7 @@ def run_lat_extended_three_ml_pipeline(
             )
             builder_seg.display(get=True)
             obs_seg = builder_seg.run(include_previous_intervals=False)
-            source_obs_list.append(obs_seg)
-
-        if obs_transient:
-            lat_observations = [obs_transient] + source_obs_list
-        else:
-            lat_observations = source_obs_list
-
-        builder_all = TransientLATDataBuilder(
-            my_lat.grb_name,
-            outfile=f"{my_lat.grb_name}_all",
-            roi=float(roi),
-            tstarts=f"{tstart_ev:.1f}",
-            tstops=f"{tstop_ev:.1f}",
-            irf="p8_transient010e",#p8_transient010e，p8_source
-            zmax=float(zmax),
-            galactic_model="template",
-            particle_model="isotr template",
-            datarepository=gtburst_data_repository,
-        )
-        builder_all.display(get=True)
-        builder_all.run(include_previous_intervals=False)
+            lat_observations.append(obs_seg)
 
         lat_plugins: Dict[str, Any] = {}
         for obs_list in lat_observations:
@@ -546,9 +523,10 @@ def run_lat_extended_three_ml_pipeline(
                 lat_plugins[lat_name] = lob.to_LATLike()
 
         fit_results: Dict[str, Any] = {}
-        for T0_i, T1_i in zip(intervals[:-1], intervals[1:]):
+        for seg in analysis_segments:
+            T0_i = float(seg["tstart"])
+            T1_i = float(seg["tstop"])
             lat_name = "LAT_%.1f-%.1f" % (T0_i, T1_i)
-            lat_model_name = ("LAT%dX%d" % (T0_i, T1_i)).replace("-", "n")
             prob_path = (
                 f"./interval{T0_i:.1f}-{T1_i:.1f}/"
                 f"gll_ft1_tr_bn{my_lat.grb_name}_v00_filt_prob.fit"
@@ -613,8 +591,9 @@ def run_lat_extended_three_ml_pipeline(
             else:
                 fit_results[lat_name] = None
 
-        for _i in range(len(intervals) - 1):
-            T0_i, T1_i = intervals[_i], intervals[_i + 1]
+        for seg in analysis_segments:
+            T0_i = float(seg["tstart"])
+            T1_i = float(seg["tstop"])
             lat_name = f"LAT_{T0_i:.1f}-{T1_i:.1f}"
             jl_i = fit_results.get(lat_name)
             if jl_i is not None:
@@ -622,7 +601,7 @@ def run_lat_extended_three_ml_pipeline(
                     jl_i, figsize=(10, 8)
                 )
                 fig_sp.savefig(
-                    f"{lat_name}_spectrum.png",
+                    f"{lat_name}_{seg['tag']}_spectrum.png",
                     dpi=300,
                     bbox_inches="tight",
                 )
@@ -653,7 +632,9 @@ def run_lat_extended_three_ml_pipeline(
         dxv: list[float] = []
 
         try:
-            for T0_i, T1_i in zip(intervals[:-1], intervals[1:]):
+            for seg in analysis_segments:
+                T0_i = float(seg["tstart"])
+                T1_i = float(seg["tstop"])
                 lat_name = "LAT_%.1f-%.1f" % (T0_i, T1_i)
                 xv.append((T1_i + T0_i) / 2)
                 dxv.append((T1_i - T0_i) / 2)
@@ -668,6 +649,12 @@ def run_lat_extended_three_ml_pipeline(
                         lo, hi = mv.equal_tail_interval()
                         yv[n + "_p"].append(hi - mv.median)
                         yv[n + "_n"].append(mv.median - lo)
+                else:
+                    for n in variates:
+                        yv[n].append(np.nan)
+                        yv[n + "_p"].append(np.nan)
+                        yv[n + "_n"].append(np.nan)
+            if xv:
                 fig_v = plt.figure(figsize=(8, 12))
                 colors_v = ["r", "b"]
                 ylabels_v = [
@@ -689,7 +676,9 @@ def run_lat_extended_three_ml_pipeline(
                     if ii == 1:
                         plt.ylim(-4, 0)
                     plt.ylabel(ylabels_v[ii])
-                    plt.xlim(tstart_ev, tstop_ev)
+                    seg_t0 = min(s["tstart"] for s in analysis_segments)
+                    seg_t1 = max(s["tstop"] for s in analysis_segments)
+                    plt.xlim(seg_t0, seg_t1)
                 fig_v.savefig("variates.png")
                 plt.close(fig_v)
         except Exception as exc:  # noqa: BLE001

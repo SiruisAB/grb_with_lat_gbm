@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -71,6 +71,104 @@ def _determine_time_bins(
 
     log(f"总持续时间: {duration:.2f}s, 分为 {num_time_bins} 个时间bin")
     return time_bins, num_time_bins, duration
+
+
+def _build_time_bins_list(
+    bnname: str,
+    t0: float,
+    t1: float,
+    fixed_num_time_bins: Optional[int] = None,
+) -> Tuple[List[np.ndarray], int, float]:
+    """
+    与 :func:`analyze_grb` 一致的时间 bin 边序列列表。
+
+    每个元素是一条 bin 边序列 ``[edge0, edge1, …]``，不是边本身的平铺列表。
+    """
+    time_bins, num_time_bins, duration = _determine_time_bins(
+        t0,
+        t1,
+        fixed_num_time_bins=fixed_num_time_bins,
+    )
+    time_bins_list: List[np.ndarray] = [time_bins]
+
+    if bnname == "bn231129799":
+        edges_231129 = np.array(
+            [0.1, 1, 3, 4.5, 6.2, 8.5],
+            dtype=float,
+        )
+        time_bins_list = [edges_231129]
+        num_time_bins = len(edges_231129) - 1
+        duration = float(edges_231129[-1] - edges_231129[0])
+
+    if bnname == "bn250313607":
+        time_bins_list = [
+            np.array([1.09, 3, 7, 10, 15, 25]),
+            np.array([260, 270, 276, 285, 299]),
+        ]
+        num_time_bins = sum(len(tb) - 1 for tb in time_bins_list)
+        duration = float(time_bins_list[-1][-1] - time_bins_list[0][0])
+
+    return time_bins_list, num_time_bins, duration
+
+
+def _build_lat_analysis_segments(
+    bnname: str,
+    t0: float,
+    t1: float,
+    fixed_num_time_bins: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    生成 LAT 瞬态分析时段：各 GBM 时间 bin + 每段边序列的全程区间。
+
+    返回元素含 ``tstart``、``tstop``、``tag``（用于输出文件名后缀）。
+    """
+    time_bins_list, _, _ = _build_time_bins_list(
+        bnname,
+        t0,
+        t1,
+        fixed_num_time_bins=fixed_num_time_bins,
+    )
+
+    def _fmt_time(t: float) -> str:
+        return f"{float(t):.2f}".rstrip("0").rstrip(".")
+
+    segments: List[Dict[str, Any]] = []
+    seen: set[tuple[float, float, str]] = set()
+
+    def _add(tstart: float, tstop: float, tag: str) -> None:
+        key = (round(tstart, 6), round(tstop, 6), tag)
+        if key in seen:
+            return
+        seen.add(key)
+        segments.append(
+            {
+                "tstart": float(tstart),
+                "tstop": float(tstop),
+                "tag": tag,
+            }
+        )
+
+    for block_idx, tb in enumerate(time_bins_list):
+        for i in range(len(tb) - 1):
+            t0_i, t1_i = float(tb[i]), float(tb[i + 1])
+            _add(
+                t0_i,
+                t1_i,
+                f"bin_{_fmt_time(t0_i)}_{_fmt_time(t1_i)}",
+            )
+        if len(tb) > 2:
+            block_tag = (
+                f"full_block{block_idx + 1}"
+                if len(time_bins_list) > 1
+                else "full"
+            )
+            _add(
+                float(tb[0]),
+                float(tb[-1]),
+                f"{block_tag}_{_fmt_time(tb[0])}_{_fmt_time(tb[-1])}",
+            )
+
+    return segments
 
 
 def _build_background_interval_string(row: pd.Series, bnname: str) -> str:
