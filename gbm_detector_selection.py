@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-import gbm_selector
 from astropy.io import fits as pyfits
 
 from .io_utils import find_files
@@ -36,6 +35,8 @@ def select_gbm_detectors(grb_dir: str) -> Tuple[List[str], float, float, float, 
         extname="SPECRESP MATRIX",
         extver=1,
     )
+
+    import gbm_selector
 
     dets = gbm_selector.select_best_detectors(
         ra_scx,
