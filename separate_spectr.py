@@ -290,7 +290,13 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Root directory containing <bnname>/band+bb/fluxdata",
     )
     parser.add_argument(
-        "--output-dir",
+        "--fluxdata-dir",
+        type=Path,
+        default=None,
+        help="Optional explicit fluxdata directory. Overrides --result-root when set.",
+    )
+    parser.add_argument(
+        "--save-result-dir",
         type=Path,
         default=None,
         help="Optional directory for PDF output. Defaults to the fluxdata directory.",
@@ -309,8 +315,16 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _output_directory_for_run(result_root: Path, bnname: str, output_dir: Optional[Path]) -> Path:
-    return output_dir if output_dir is not None else Path(result_root) / bnname / "band+bb" / "fluxdata"
+def _resolve_fluxdata_dir(
+    result_root: Path,
+    bnname: str,
+    fluxdata_dir: Optional[Path],
+) -> Path:
+    return fluxdata_dir if fluxdata_dir is not None else Path(result_root) / bnname / "band+bb" / "fluxdata"
+
+
+def _resolve_output_dir(fluxdata_dir: Path, save_result_dir: Optional[Path]) -> Path:
+    return save_result_dir if save_result_dir is not None else fluxdata_dir
 
 
 def _setup_logger(log_file: Optional[Path]) -> logging.Logger:
@@ -335,8 +349,8 @@ def _setup_logger(log_file: Optional[Path]) -> logging.Logger:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
-    fluxdata_dir = args.result_root / args.bnname / "band+bb" / "fluxdata"
-    output_dir = _output_directory_for_run(args.result_root, args.bnname, args.output_dir)
+    fluxdata_dir = _resolve_fluxdata_dir(args.result_root, args.bnname, args.fluxdata_dir)
+    output_dir = _resolve_output_dir(fluxdata_dir, args.save_result_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = args.log_file or (output_dir / "fluxdata_redraw.log")
     logger = _setup_logger(log_file)

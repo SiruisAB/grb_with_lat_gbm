@@ -108,7 +108,8 @@ def test_redraw_entrypoint_uses_default_bandbb_fluxdata_path(monkeypatch, tmp_pa
 def test_cli_main_creates_log_file_and_outputs(tmp_path: Path):
     from grb_project import separate_spectr
 
-    flux_dir = tmp_path / "GRB231129C" / "band+bb" / "fluxdata"
+    flux_dir = tmp_path / "custom_fluxdata"
+    save_dir = tmp_path / "custom_results"
     rows = [(10.0, 1.0, 1.2, 4.0e-8, 8.0e-9, 8.0e-9)]
     for prefix in ["nai_n3", "nai_n7", "bgo_b0", "lat"]:
         _write_fluxdata_file(flux_dir / f"band+bb_{prefix}_data_point_0.1-1.txt", rows)
@@ -118,12 +119,19 @@ def test_cli_main_creates_log_file_and_outputs(tmp_path: Path):
         "GRB231129C",
         "--result-root",
         str(tmp_path),
+        "--fluxdata-dir",
+        str(flux_dir),
+        "--save-result-dir",
+        str(save_dir),
         "--log-file",
         str(tmp_path / "redraw.log"),
     ])
 
     assert code == 0
-    assert (flux_dir / "bs_GRB231129C_gbm_lat_spectra_band+bb_0.1-1.pdf").exists()
-    assert (flux_dir / "bs_GRB231129C_gbm_lat_spectra_band+bb_overview.pdf").exists()
+    assert (save_dir / "bs_GRB231129C_gbm_lat_spectra_band+bb_0.1-1.pdf").exists()
+    assert (save_dir / "bs_GRB231129C_gbm_lat_spectra_band+bb_overview.pdf").exists()
     assert (tmp_path / "redraw.log").exists()
-    assert "Fluxdata directory" in (tmp_path / "redraw.log").read_text(encoding="utf-8")
+    log_text = (tmp_path / "redraw.log").read_text(encoding="utf-8")
+    assert "Fluxdata directory" in log_text
+    assert str(flux_dir) in log_text
+    assert str(save_dir) in log_text
