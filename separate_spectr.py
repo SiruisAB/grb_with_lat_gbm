@@ -945,7 +945,7 @@ def discrete_spectr(
     ax = plt.gca()
     ax.set_xlabel('$E$ [keV]')
     ax.set_ylabel('$E^{2} dN/dE$ [erg s$^{-1}$cm$^{-2}$]')
-    ax.set_title(f"{bnname}_spectra{time_bin_suffix}")
+    # ax.set_title(f"{bnname}_spectra{time_bin_suffix}")
     ax.minorticks_on()
     _style_publication_axes(ax)
     ax.legend(loc=2)
