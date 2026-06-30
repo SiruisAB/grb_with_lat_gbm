@@ -5,6 +5,8 @@ from matplotlib import rcParams
 
 rcParams["font.family"] = "Sans-serif"
 
+import argparse
+import logging
 import os
 import re
 from pathlib import Path
@@ -13,23 +15,42 @@ from typing import Optional
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-import spectres
-from astropy import units as u
-from astromodels import (
-    Band,
-    Blackbody,
-    Cutoff_powerlaw,
-    Gaussian,
-    Log_uniform_prior,
-    Model,
-    PointSource,
-    Powerlaw,
-    Uniform_prior,
-    NonDissipativePhotosphere
-)
-from threeML import *  # noqa: F401,F403
 
-from .modelbuild import MultiColorBlackBody, build_model
+try:
+    import spectres
+except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
+    spectres = None
+
+try:
+    from astropy import units as u
+except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
+    u = None
+
+try:
+    from astromodels import (
+        Band,
+        Blackbody,
+        Cutoff_powerlaw,
+        Gaussian,
+        Log_uniform_prior,
+        Model,
+        PointSource,
+        Powerlaw,
+        Uniform_prior,
+        NonDissipativePhotosphere,
+    )
+except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
+    Band = Blackbody = Cutoff_powerlaw = Gaussian = Log_uniform_prior = Model = PointSource = Powerlaw = Uniform_prior = NonDissipativePhotosphere = None
+
+try:
+    from threeML import *  # noqa: F401,F403
+except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
+    pass
+
+try:
+    from .modelbuild import MultiColorBlackBody, build_model
+except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
+    MultiColorBlackBody = build_model = None
 
 mpl.rcParams.update(
     {
@@ -255,6 +276,101 @@ def redraw_bandbb_fluxdata_outputs(
         output_dir=fluxdata_dir,
         bnname=bnname,
     )
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Redraw band+bb spectra from saved fluxdata files."
+    )
+    parser.add_argument("--bnname", required=True, help="Burst name, e.g. GRB231129C")
+    parser.add_argument(
+        "--result-root",
+        required=True,
+        type=Path,
+        help="Root directory containing <bnname>/band+bb/fluxdata",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for PDF output. Defaults to the fluxdata directory.",
+    )
+    parser.add_argument(
+        "--timebin",
+        default=None,
+        help="Redraw only one time bin, e.g. 0.1-1.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional path to save a log file.",
+    )
+    return parser
+
+
+def _output_directory_for_run(result_root: Path, bnname: str, output_dir: Optional[Path]) -> Path:
+    return output_dir if output_dir is not None else Path(result_root) / bnname / "band+bb" / "fluxdata"
+
+
+def _setup_logger(log_file: Optional[Path]) -> logging.Logger:
+    logger = logging.getLogger("grb_project.separate_spectr.redraw")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    logger.addHandler(stream_handler)
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = _build_cli_parser()
+    args = parser.parse_args(argv)
+    fluxdata_dir = args.result_root / args.bnname / "band+bb" / "fluxdata"
+    output_dir = _output_directory_for_run(args.result_root, args.bnname, args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_file = args.log_file or (output_dir / "fluxdata_redraw.log")
+    logger = _setup_logger(log_file)
+    logger.info("Fluxdata directory: %s", fluxdata_dir)
+    logger.info("Output directory: %s", output_dir)
+    logger.info("Log file: %s", log_file)
+
+    if args.timebin:
+        logger.info("Redrawing time bin: %s", args.timebin)
+        out_path = redraw_fluxdata_timebin(
+            timebin=args.timebin,
+            fluxdata_dir=fluxdata_dir,
+            output_dir=output_dir,
+            bnname=args.bnname,
+        )
+        logger.info("Saved: %s", out_path)
+    else:
+        logger.info("Redrawing all fluxdata spectra")
+        outputs = redraw_all_fluxdata_spectra(
+            fluxdata_dir=fluxdata_dir,
+            output_dir=output_dir,
+            bnname=args.bnname,
+        )
+        for path in outputs["single_plots"]:
+            logger.info("Saved: %s", path)
+        for path in outputs["overview"]:
+            logger.info("Saved: %s", path)
+
+    logger.info("Done")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 def discrete_spectr(
