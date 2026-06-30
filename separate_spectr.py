@@ -6,6 +6,7 @@ from matplotlib import rcParams
 rcParams["font.family"] = "Sans-serif"
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -105,6 +106,8 @@ _FLUXDATA_RE = re.compile(
     r"^band\+bb_(nai_[^_]+|bgo_[^_]+|lat)_data_point_(.+)\.txt$"
 )
 
+_JSON_TIMEBIN_RE = re.compile(r"^bn[^_]+_bin_(?P<start>[0-9.]+)_(?P<end>[0-9.]+)$")
+
 
 def discover_fluxdata_groups(fluxdata_dir: Path) -> dict[str, dict[str, Path]]:
     groups: dict[str, dict[str, Path]] = {}
@@ -122,6 +125,53 @@ def _read_fluxdata_file(path: Path) -> np.ndarray:
     if data.ndim == 1:
         data = np.atleast_2d(data)
     return data
+
+
+def _normalize_timebin(timebin: str) -> str:
+    text = str(timebin).strip()
+    if "-" not in text:
+        return text
+    start_s, end_s = text.split("-", 1)
+    return f"{float(start_s):g}-{float(end_s):g}"
+
+
+def _find_json_bin_entry(json_payload: dict, bnname: str, timebin: str) -> tuple[str, dict]:
+    burst_root = json_payload.get(bnname, {})
+    bins = burst_root.get("bins", {})
+    timebin_norm = _normalize_timebin(timebin)
+    for bin_key, entry in bins.items():
+        meta = entry.get("meta", {})
+        if meta.get("time_bin_identifier") == timebin_norm:
+            return bin_key, entry
+        match = _JSON_TIMEBIN_RE.match(bin_key)
+        if match:
+            start = float(match.group("start"))
+            end = float(match.group("end"))
+            if _normalize_timebin(f"{start}-{end}") == timebin_norm:
+                return bin_key, entry
+            if f"{start:.2f}-{end:.2f}" == timebin_norm:
+                return bin_key, entry
+        if meta.get("bin_start_time") is not None and meta.get("bin_end_time") is not None:
+            cand = _normalize_timebin(f"{float(meta['bin_start_time'])}-{float(meta['bin_end_time'])}")
+            if cand == timebin_norm:
+                return bin_key, entry
+    raise KeyError(f"No fit entry found for {bnname} {timebin}")
+
+
+def load_bandbb_fit_params(json_path: Path, bnname: str, timebin: str) -> dict[str, float]:
+    payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    _, entry = _find_json_bin_entry(payload, bnname, timebin)
+    bandbb = entry.get("band+bb")
+    if not bandbb:
+        raise KeyError(f"No band+bb fit found for {bnname} {timebin}")
+    return {
+        "K_1": float(bandbb["GRB.spectrum.main.composite.K_1_value"]),
+        "alpha_1": float(bandbb["GRB.spectrum.main.composite.alpha_1_value"]),
+        "xp_1": float(bandbb["GRB.spectrum.main.composite.xp_1_value"]),
+        "beta_1": float(bandbb["GRB.spectrum.main.composite.beta_1_value"]),
+        "K_2": float(bandbb["GRB.spectrum.main.composite.K_2_value"]),
+        "kT_2": float(bandbb["GRB.spectrum.main.composite.kT_2_value"]),
+    }
 
 
 def _plot_fluxdata_detector(ax, path: Path, label: str, marker: str, color: str) -> None:
@@ -150,11 +200,74 @@ def _format_timebin_title(bnname: str, timebin: str) -> str:
     return f"{bnname}_spectra_{timebin}"
 
 
+def compute_bandbb_curves(
+    xs: np.ndarray,
+    K_1: float,
+    alpha_1: float,
+    xp_1: float,
+    beta_1: float,
+    K_2: float,
+    kT_2: float,
+) -> dict[str, np.ndarray]:
+    xs = np.asarray(xs, dtype=float)
+    band = np.empty_like(xs)
+    ebreak = (alpha_1 - beta_1) * xp_1 / (2.0 + alpha_1)
+    band_low = xs <= ebreak
+    band_high = ~band_low
+    band[band_low] = K_1 * (xs[band_low] / 100.0) ** alpha_1 * np.exp(-xs[band_low] * (2.0 + alpha_1) / xp_1)
+    band[band_high] = (
+        K_1
+        * ((alpha_1 - beta_1) * xp_1 / (100.0 * (2.0 + alpha_1))) ** (alpha_1 - beta_1)
+        * np.exp(beta_1 - alpha_1)
+        * (xs[band_high] / 100.0) ** beta_1
+    )
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        bb = K_2 * xs**2 / np.expm1(xs / kT_2)
+    bb = np.where(np.isfinite(bb), bb, 0.0)
+    total = band + bb
+    return {"total": total, "band": band, "bb": bb}
+
+
+def _overlay_fit_curves(
+    ax,
+    timebin: str,
+    bnname: str,
+    fit_json_path: Path | None,
+) -> None:
+    if fit_json_path is None:
+        return
+    params = load_bandbb_fit_params(fit_json_path, bnname=bnname, timebin=timebin)
+    xs = np.logspace(np.log10(8.0), np.log10(1e5), 400)
+    curves = compute_bandbb_curves(xs, **params)
+    ax.plot(xs, curves["total"], color="#1f77b4", linewidth=2.2, label="Band+BB total fit")
+    ax.plot(xs, curves["band"], color="#d62728", linestyle=":", linewidth=1.8, label="Band fit")
+    ax.plot(xs, curves["bb"], color="#2ca02c", linestyle="--", linewidth=1.8, label="BB fit")
+    param_text = (
+        f"K1={params['K_1']:.3g}\n"
+        f"alpha={params['alpha_1']:.3g}\n"
+        f"xp={params['xp_1']:.3g}\n"
+        f"beta={params['beta_1']:.3g}\n"
+        f"K2={params['K_2']:.3g}\n"
+        f"kT={params['kT_2']:.3g}"
+    )
+    ax.text(
+        0.98,
+        0.98,
+        param_text,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75, edgecolor="#999999"),
+    )
+
+
 def redraw_fluxdata_timebin(
     timebin: str,
     fluxdata_dir: Path,
     output_dir: Path,
     bnname: str,
+    fit_json_path: Path | None = None,
 ) -> Path:
     groups = discover_fluxdata_groups(fluxdata_dir)
     if timebin not in groups:
@@ -184,6 +297,7 @@ def redraw_fluxdata_timebin(
     ax.set_yscale("log")
     ax.set_xlabel("$E$ [keV]")
     ax.set_ylabel("$E^{2} dN/dE$ [erg s$^{-1}$cm$^{-2}$]")
+    _overlay_fit_curves(ax, timebin=timebin, bnname=bnname, fit_json_path=fit_json_path)
     ax.set_title(_format_timebin_title(bnname, timebin))
     ax.minorticks_on()
     _style_publication_axes(ax)
@@ -203,6 +317,7 @@ def redraw_fluxdata_overview(
     fluxdata_dir: Path,
     output_dir: Path,
     bnname: str,
+    fit_json_path: Path | None = None,
 ) -> Path:
     timebins = list(groups)
     n_plots = len(timebins)
@@ -227,6 +342,7 @@ def redraw_fluxdata_overview(
             if path is None:
                 continue
             _plot_fluxdata_detector(ax, path, label=label, marker=marker, color=color)
+        _overlay_fit_curves(ax, timebin=timebin, bnname=bnname, fit_json_path=fit_json_path)
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_title(timebin)
@@ -256,25 +372,28 @@ def redraw_all_fluxdata_spectra(
     fluxdata_dir: Path,
     output_dir: Path,
     bnname: str,
+    fit_json_path: Path | None = None,
 ) -> dict[str, list[Path]]:
     groups = discover_fluxdata_groups(fluxdata_dir)
     single_plots = [
-        redraw_fluxdata_timebin(timebin, fluxdata_dir, output_dir, bnname)
+        redraw_fluxdata_timebin(timebin, fluxdata_dir, output_dir, bnname, fit_json_path=fit_json_path)
         for timebin in groups
     ]
-    overview = redraw_fluxdata_overview(groups, fluxdata_dir, output_dir, bnname)
+    overview = redraw_fluxdata_overview(groups, fluxdata_dir, output_dir, bnname, fit_json_path=fit_json_path)
     return {"single_plots": single_plots, "overview": [overview]}
 
 
 def redraw_bandbb_fluxdata_outputs(
     bnname: str,
     result_root: Path,
+    fit_json_path: Path | None = None,
 ) -> dict[str, list[Path]]:
     fluxdata_dir = Path(result_root) / bnname / "band+bb" / "fluxdata"
     return redraw_all_fluxdata_spectra(
         fluxdata_dir=fluxdata_dir,
         output_dir=fluxdata_dir,
         bnname=bnname,
+        fit_json_path=fit_json_path,
     )
 
 
@@ -305,6 +424,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--timebin",
         default=None,
         help="Redraw only one time bin, e.g. 0.1-1.",
+    )
+    parser.add_argument(
+        "--fit-json",
+        type=Path,
+        default=None,
+        help="Optional JSON file with best-fit band+bb parameters.",
     )
     parser.add_argument(
         "--log-file",
@@ -356,6 +481,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger = _setup_logger(log_file)
     logger.info("Fluxdata directory: %s", fluxdata_dir)
     logger.info("Output directory: %s", output_dir)
+    logger.info("Fit JSON: %s", args.fit_json if args.fit_json else "<none>")
     logger.info("Log file: %s", log_file)
 
     if args.timebin:
@@ -365,6 +491,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             fluxdata_dir=fluxdata_dir,
             output_dir=output_dir,
             bnname=args.bnname,
+            fit_json_path=args.fit_json,
         )
         logger.info("Saved: %s", out_path)
     else:
@@ -373,6 +500,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             fluxdata_dir=fluxdata_dir,
             output_dir=output_dir,
             bnname=args.bnname,
+            fit_json_path=args.fit_json,
         )
         for path in outputs["single_plots"]:
             logger.info("Saved: %s", path)
