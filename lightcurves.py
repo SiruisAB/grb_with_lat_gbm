@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -24,10 +23,13 @@ from threeML import TimeSeriesBuilder
 from threeML.config.config import threeML_config
 from threeML.io.plotting.step_plot import step_plot
 
+from .gbm_core import resolve_active_interval_from_special_and_catalog
 from .gbm_detector_selection import select_gbm_detectors
 from .runtime_env import ensure_analysis_runtime
 from .session import session
 from .logging_utils import log
+
+SPECIAL_BURSTS_YAML = Path(__file__).with_name("special_bursts.yaml")
 
 TITLE_BOX = dict(
     boxstyle="round,pad=0.35",
@@ -35,6 +37,24 @@ TITLE_BOX = dict(
     edgecolor="0.55",
     linewidth=0.75,
     alpha=0.95,
+)
+
+PAPER_DETECTOR_STYLES = {
+    "nai_n3": {"marker": "P", "color": "#4e79a7"},
+    "nai_n7": {"marker": "X", "color": "#f28e2b"},
+    "bgo_b0": {"marker": "s", "color": "#59a14f"},
+    "lat": {"marker": "v", "color": "#b07aa1"},
+}
+
+PAPER_LEGEND_STYLE = dict(
+    frameon=True,
+    framealpha=0.92,
+    edgecolor="#d0d0d0",
+    facecolor="white",
+    handlelength=1.3,
+    handletextpad=0.5,
+    borderpad=0.5,
+    labelspacing=0.4,
 )
 
 
@@ -67,7 +87,17 @@ def resolve_spectral_time_bins_for_lightcurve(
     （含 ``bn231129799`` 等目录内特例）。总段数 < 2 时返回 ``None``。
     """
     if spectral_time_bins is not None:
-        return [np.asarray(tb, dtype=float) for tb in spectral_time_bins]
+        normalized: List[np.ndarray] = []
+        for tb in spectral_time_bins:
+            if isinstance(tb, dict):
+                if "start" in tb and "stop" in tb:
+                    normalized.append(np.asarray([float(tb["start"]), float(tb["stop"])], dtype=float))
+                    continue
+                if "tstart" in tb and "tstop" in tb:
+                    normalized.append(np.asarray([float(tb["tstart"]), float(tb["tstop"])], dtype=float))
+                    continue
+            normalized.append(np.asarray(tb, dtype=float))
+        return normalized
     parsed = _parse_source_interval_pair(active_interval)
     if parsed is None:
         return None
@@ -134,6 +164,83 @@ def read_trigger_met_and_grb_name(bnname: str, fermilat_xls: Optional[str] = Non
     return trigger_met, grb_name
 
 
+def read_special_burst_time_segments(bnname: str, yaml_path: Optional[Union[str, Path]] = None) -> Optional[List[dict]]:
+    """从 ``special_bursts.yaml`` 读取当前 ``bnname`` 的时间分段。"""
+    path = Path(yaml_path or SPECIAL_BURSTS_YAML)
+    if not path.exists():
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    bursts = data.get("special_bursts", []) if isinstance(data, dict) else []
+    bn = str(bnname).strip()
+    for burst in bursts:
+        if str(burst.get("bnname", "")).strip() != bn:
+            continue
+        segs = burst.get("time_segments", []) or []
+        normalized: List[dict] = []
+        for idx, seg in enumerate(segs):
+            try:
+                t0 = float(seg.get("start"))
+                t1 = float(seg.get("stop"))
+            except Exception:
+                continue
+            if not np.isfinite(t0) or not np.isfinite(t1) or t1 <= t0:
+                continue
+            normalized.append({"tstart": t0, "tstop": t1, "tag": str(seg.get("name", f"seg{idx + 1}"))})
+        return normalized or None
+    return None
+
+
+def read_activity_interval_from_catalog(bnname: str, catalog_xls: Optional[str] = None) -> Optional[Tuple[float, float]]:
+    """从 GBM 目录表读取活动时间窗：优先用 ``t90_start`` 与 ``t90_start + t90``。"""
+    path = catalog_xls or session.catalog_xls
+    try:
+        df = pd.read_excel(path, sheet_name="fermigbrst")
+    except Exception:
+        return None
+    bn_col = "trigger_name" if "trigger_name" in df.columns else ("bnname" if "bnname" in df.columns else None)
+    if bn_col is None or "t90_start" not in df.columns or "t90" not in df.columns:
+        return None
+    row = df[df[bn_col].astype(str).str.strip() == str(bnname).strip()]
+    if row.empty:
+        return None
+    first = row.iloc[0]
+    try:
+        t0 = float(first["t90_start"])
+        t95 = float(first["t90_start"]) + float(first["t90"])
+    except Exception:
+        return None
+    if not np.isfinite(t0) or not np.isfinite(t95):
+        return None
+    if t95 <= t0:
+        return None
+    if t0 < 0:
+        t0 = 0.0
+    return t0, t95
+
+
+def resolve_lightcurve_display_window(
+    active_interval: str,
+    pad_before_s: float = 1.0,
+    pad_after_s: Optional[float] = None,
+) -> Optional[Tuple[float, float]]:
+    """把 active interval 转成更适合出图的观测窗口。"""
+    parsed = _parse_source_interval_pair(active_interval)
+    if parsed is None:
+        return None
+    start, stop = parsed
+    after = float(pad_after_s if pad_after_s is not None else 0.0)
+    start = float(np.floor(start) - 1.0)
+    stop = float(np.ceil(stop) + after)
+    if not np.isfinite(start) or not np.isfinite(stop) or stop <= start:
+        return None
+    return start, stop
+
+
 def resolve_gbm_tte_rsp(grb_dir: Union[str, Path], det: str) -> Tuple[Path, Path]:
     """在暴目录下匹配 ``glg_tte_{det}_*.fit`` 与 ``glg_cspec_{det}_*.rsp2``。"""
     d = Path(grb_dir)
@@ -144,6 +251,14 @@ def resolve_gbm_tte_rsp(grb_dir: Union[str, Path], det: str) -> Tuple[Path, Path
     if not rsps:
         raise FileNotFoundError(f"{d}: 未找到 glg_cspec_{det}_*.rsp2")
     return ttes[0], rsps[0]
+
+
+def resolve_gbm_cspec(grb_dir: Union[str, Path], det: str) -> Path:
+    d = Path(grb_dir)
+    cspecs = sorted(d.glob(f"glg_cspec_{det}_*.pha"))
+    if not cspecs:
+        raise FileNotFoundError(f"{d}: 未找到 glg_cspec_{det}_*.pha")
+    return cspecs[0]
 
 
 def discover_lat_prob_fit_files(result_bn_dir: Union[str, Path]) -> List[Path]:
@@ -188,13 +303,6 @@ def load_lat_ft1_prob_events(
     )
 
 
-def _spectral_bin_label(index: int) -> str:
-    """第 index 个时间 bin 的标签：0→a, 1→b, …, 25→z, 更大则用序号。"""
-    if index < 26:
-        return chr(ord("a") + index)
-    return str(index + 1)
-
-
 def flatten_spectral_time_segments(
     time_bins_list: Sequence[Union[np.ndarray, Sequence[float]]],
 ) -> List[Tuple[float, float]]:
@@ -209,6 +317,13 @@ def flatten_spectral_time_segments(
             if t1 > t0:
                 segments.append((t0, t1))
     return segments
+
+
+def _spectral_bin_label(index: int) -> str:
+    """第 index 个时间 bin 的标签：0→a, 1→b, …, 25→z, 更大则用序号。"""
+    if index < 26:
+        return chr(ord("a") + index)
+    return str(index + 1)
 
 
 def annotate_spectral_time_bins(
@@ -264,16 +379,26 @@ def annotate_spectral_time_bins(
 def shade_active_interval(
     ax_list,
     tsb_ref: TimeSeriesBuilder,
+    active_interval: Optional[str] = None,
     face: str = "#c8e6c9",
     alpha: float = 0.5,
     line: str = "#c62828",
-) -> None:
-    """在子图内用浅色 ``axvspan`` 标出 ``set_active_time_interval``，边界虚线。"""
-    el = tsb_ref.time_series
-    if el.time_intervals is None:
-        return
-    sel = np.asarray(el.time_intervals.bin_stack, dtype=float).copy()
-    np.round(sel, decimals=4, out=sel)
+) -> Optional[np.ndarray]:
+    """优先按传入 ``active_interval`` 高亮；否则回退到 ``set_active_time_interval``。
+
+    返回实际使用的区间数组，便于图下注释与界面文案保持一致。
+    """
+    sel: Optional[np.ndarray] = None
+    parsed = _parse_source_interval_pair(active_interval) if active_interval is not None else None
+    if parsed is not None:
+        sel = np.asarray([parsed], dtype=float)
+    else:
+        el = tsb_ref.time_series
+        if el.time_intervals is not None:
+            sel = np.asarray(el.time_intervals.bin_stack, dtype=float).copy()
+            np.round(sel, decimals=4, out=sel)
+    if sel is None:
+        return None
     for ax in ax_list:
         for t0, t1 in sel:
             ax.axvspan(
@@ -286,6 +411,92 @@ def shade_active_interval(
             )
             ax.axvline(t0, color=line, ls="--", lw=0.9, alpha=0.75, zorder=-199)
             ax.axvline(t1, color=line, ls="--", lw=0.9, alpha=0.75, zorder=-199)
+    return sel
+
+
+def _special_segment_label(index: int, seg: dict) -> str:
+    if index < 26:
+        return chr(ord("a") + index)
+    return str(index + 1)
+
+
+def _special_segment_bounds(seg: dict) -> Optional[Tuple[float, float]]:
+    """兼容 ``tstart``/``tstop`` 与 ``start``/``stop`` 两种特殊分段格式。"""
+    try:
+        if "tstart" in seg or "tstop" in seg:
+            t0 = float(seg.get("tstart"))
+            t1 = float(seg.get("tstop"))
+        else:
+            t0 = float(seg.get("start"))
+            t1 = float(seg.get("stop"))
+    except Exception:
+        return None
+    if not np.isfinite(t0) or not np.isfinite(t1) or t1 <= t0:
+        return None
+    return t0, t1
+
+
+def _special_segment_labels(time_segments: Optional[Sequence[dict]]) -> List[str]:
+    labels: List[str] = []
+    if not time_segments:
+        return labels
+    for seg in time_segments:
+        bounds = _special_segment_bounds(seg)
+        if bounds is None:
+            continue
+        labels.append(_special_segment_label(len(labels), seg))
+    return labels
+
+
+def shade_time_segments(
+    ax_list,
+    time_segments: Optional[Sequence[dict]],
+    *,
+    line_color: str = "#546e7a",
+    line_width: float = 0.8,
+    label_y_axes: float = 0.985,
+) -> int:
+    """把特殊分段画成边界线，并在段顶标注分段名。
+
+    按当前图示约定，只强调分段边界；不为未选中的时间段添加底色。
+    同时兼容 ``tstart``/``tstop`` 与 ``start``/``stop`` 两种输入格式。
+    """
+    if not time_segments:
+        return 0
+    count = 0
+    visible_idx = 0
+    for seg in time_segments:
+        bounds = _special_segment_bounds(seg)
+        if bounds is None:
+            continue
+        t0, t1 = bounds
+        label = _special_segment_label(visible_idx, seg)
+        visible_idx += 1
+        for ax in ax_list:
+            ax.axvspan(
+                t0,
+                t1,
+                facecolor=line_color,
+                edgecolor="none",
+                alpha=0.10,
+                zorder=2,
+            )
+            ax.axvline(t0, color=line_color, lw=line_width, ls=":", alpha=0.95, zorder=3)
+            ax.axvline(t1, color=line_color, lw=line_width, ls=":", alpha=0.95, zorder=3)
+            ax.text(
+                0.5 * (t0 + t1),
+                label_y_axes,
+                label,
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=9,
+                color=line_color,
+                zorder=6,
+                clip_on=True,
+            )
+        count += 1
+    return count
 
 
 def kev_band_to_echan(tte_path: Union[str, Path], emin_kev: float, emax_kev: float) -> Tuple[int, int]:
@@ -429,7 +640,10 @@ def plot_mean_lightcurve_on_ax(
         fontsize=11,
         bbox=TITLE_BOX,
     )
-    ax.set_xlim(time_bins.min(), time_bins.max())
+    ax.tick_params(axis="both", which="major", labelsize=14)
+    ax.tick_params(axis="both", which="minor", labelsize=12)
+    ax.set_ylabel("Rate (cnts/s)", fontsize=15)
+    ax.set_xlim(float(start), float(stop))
     w0 = np.array(
         [tsb_list[0].time_series.exposure_over_interval(t0, t1) for t0, t1 in time_bins]
     )
@@ -447,8 +661,8 @@ def plot_gbm_lat_lightcurve_figure(
     data_dir: Optional[str] = None,
     lat_prob_bn_dir: Optional[Union[str, Path]] = None,
     lat_prob_threshold: float = 0.9,
-    gbm_start: float = -2.0,
-    gbm_stop: float = 20.0,
+    gbm_start: Optional[float] = None,
+    gbm_stop: Optional[float] = None,
     gbm_dt: float = 0.1,
     lat_bin_s: float = 0.2,
     lat_emin_mev: float = 100.0,
@@ -459,6 +673,8 @@ def plot_gbm_lat_lightcurve_figure(
     background_unbinned: bool = False,
     bands_kev: Sequence[Tuple[float, float]] = ((8.0, 50.0), (50.0, 300.0)),
     nai_bands_kev: Optional[Sequence[Tuple[float, float]]] = None,
+    display_window_pad_before_s: float = 1.0,
+    display_window_pad_after_s: Optional[float] = 1.0,
     bgo_band_kev: Tuple[float, float] = (300.0, 38000.0),
     band_titles: Optional[Sequence[str]] = None,
     out_path: Optional[Union[str, Path]] = None,
@@ -466,6 +682,7 @@ def plot_gbm_lat_lightcurve_figure(
     dpi: int = 150,
     include_lat: bool = True,
     spectral_time_bins: Optional[Sequence[Union[np.ndarray, Sequence[float]]]] = None,
+    special_time_segments: Optional[Sequence[dict]] = None,
     fixed_num_time_bins: Optional[int] = None,
 ) -> Figure:
     """
@@ -482,9 +699,7 @@ def plot_gbm_lat_lightcurve_figure(
         ``session.result_root / grb_name / bnname``。
         若该目录下无 prob 文件，则不绘制 LAT 子图（退化为三幅 GBM），并写一条日志提示。
     lat_prob_threshold
-        ``GRB`` 概率列大于该阈值时散点为实心圆；否则为略大、加粗、略压暗的 viridis
-        描边空心圆（仍按能量上色），便于与实心点区分。严格小于该阈值的空心点旁
-        标注概率（两位小数）。
+        ``GRB`` 概率列大于等于该阈值时散点为黑色实心圆；严格小于该阈值时仅为黑色空心圆。
     nai_detector_ids, bgo_detector_id
         若为 ``None``，则与光谱流程一致：在 ``grb_dir`` 下调用
         :func:`~grb_project.gbm_detector_selection.select_gbm_detectors` 再经
@@ -502,10 +717,45 @@ def plot_gbm_lat_lightcurve_figure(
         当总段数 ≥ 2 时，在各 GBM/LAT 子图上画绿色竖直虚线并在段顶标注 a/b/c…。
         为 ``None`` 时，若 ``active_interval`` 可解析为 ``t0-t1``，则按 ``bnname`` 调用
         ``_build_time_bins_list`` 自动推断（与 ``analyze_single`` 一致）。
+    special_time_segments
+        来自 ``special_bursts.yaml`` 的特殊时间分段；若给定，将以分割线和标签叠加到
+        所有子图上，用于突出显示手工分段。不会为未选中的时间段添加底色。
     fixed_num_time_bins
         传给 ``_build_time_bins_list`` 的固定分 bin 数；仅影响自动推断分段。
     """
     ensure_analysis_runtime()
+
+    # 允许 web/CLI 调用方传入 None，使用与界面默认值一致的兜底范围。
+    if gbm_start is None or gbm_stop is None:
+        display_window = resolve_lightcurve_display_window(
+            active_interval,
+            display_window_pad_before_s,
+            display_window_pad_after_s,
+        )
+        if display_window is not None:
+            display_start, display_stop = display_window
+            gbm_start = display_start if gbm_start is None else gbm_start
+            gbm_stop = display_stop if gbm_stop is None else gbm_stop
+        else:
+            catalog_interval = read_activity_interval_from_catalog(bnname)
+            if catalog_interval is None:
+                parsed = _parse_source_interval_pair(active_interval)
+                if parsed is not None:
+                    catalog_interval = parsed
+            if catalog_interval is not None:
+                active_t0, active_t1 = catalog_interval
+                gbm_start = active_t0 - 2.0 if gbm_start is None else gbm_start
+                gbm_stop = active_t1 + 2.0 if gbm_stop is None else gbm_stop
+            else:
+                if gbm_start is None:
+                    gbm_start = -2.0
+                if gbm_stop is None:
+                    gbm_stop = 20.0
+    if lat_bin_s is None:
+        lat_bin_s = 0.2
+    gbm_start = float(gbm_start)
+    gbm_stop = float(gbm_stop)
+    lat_bin_s = float(lat_bin_s)
 
     base_data = Path(data_dir or session.data_dir)
     grb_dir = base_data / bnname
@@ -577,12 +827,29 @@ def plot_gbm_lat_lightcurve_figure(
         raise ValueError(f"bgo_band_kev 须满足 emin < emax，当前为 {bgo_band_kev!r}")
     bgo_es, bgo_ee = kev_band_to_echan(tb_bgo_tte, bgo_lo, bgo_hi)
 
+    if special_time_segments is None:
+        special_time_segments = read_special_burst_time_segments(bnname)
+    catalog_interval = read_activity_interval_from_catalog(bnname)
+    active_interval = resolve_active_interval_from_special_and_catalog(
+        special_time_segments,
+        None if catalog_interval is None else pd.Series({"t90_start": catalog_interval[0], "t90": catalog_interval[1] - catalog_interval[0]}),
+        active_interval,
+    )
+
+    if gbm_start is None:
+        if special_time_segments:
+            gbm_start = float(special_time_segments[0]["tstart"]) - 2.0
+        elif catalog_interval is not None:
+            gbm_start = float(catalog_interval[0]) - 2.0
+        else:
+            gbm_start = -2.0
+
     for tsb in (*builders, bgo_b):
         tsb.set_active_time_interval(active_interval)
         tsb.set_background_interval(*background_intervals, unbinned=background_unbinned)
 
     nai_builders = builders
-    lat_bins = np.arange(gbm_start, gbm_stop + lat_bin_s, lat_bin_s)
+    lat_bins = np.arange(float(gbm_start), float(gbm_stop) + float(lat_bin_s), float(lat_bin_s))
     lat_plot: Optional[np.ndarray] = None
     if lat_show_panel and lat_time_rel is not None and lat_energy_mev is not None:
         lat_win = (lat_time_rel >= gbm_start) & (lat_time_rel <= gbm_stop)
@@ -590,7 +857,7 @@ def plot_gbm_lat_lightcurve_figure(
         lat_plot = lat_win & lat_e_ok
 
     titles_default = tuple(
-        f"NaI({lo:g}–{hi:g} keV)" for lo, hi in nai_kev_bands
+        f"NaI {lo:g}–{hi:g} keV" for lo, hi in nai_kev_bands
     )
     if band_titles is not None:
         titles_use = tuple(band_titles)
@@ -660,7 +927,7 @@ def plot_gbm_lat_lightcurve_figure(
             color="C1",
             zorder=2,
         )
-        ax_lat.set_ylabel(f"LAT events / {lat_bin_s:g} s")
+        ax_lat.set_ylabel(f"LAT events / {lat_bin_s:g} s", fontsize=15)
         ax_lat.text(
             0.98,
             0.97,
@@ -671,95 +938,70 @@ def plot_gbm_lat_lightcurve_figure(
             fontsize=11,
             bbox=TITLE_BOX,
         )
+        ax_lat.tick_params(axis="both", which="major", labelsize=14)
+        ax_lat.tick_params(axis="both", which="minor", labelsize=12)
         ax_lat.grid(True, alpha=0.3)
 
         ax_e = ax_lat.twinx()
         t_plot = lat_time_rel[lat_plot]
         e_plot = lat_energy_mev[lat_plot]
         p_plot = lat_prob[lat_plot]
-        hi = p_plot > float(lat_prob_threshold)
-        lo = ~hi
-        e_pos = e_plot[e_plot > 0]
-        if e_pos.size:
-            vmin_e = float(max(lat_emin_mev, e_pos.min()))
-            vmax_e = float(e_pos.max())
-        else:
-            vmin_e = float(lat_emin_mev)
-            vmax_e = float(lat_emin_mev) * 10.0
-        norm_e = mcolors.LogNorm(vmin=vmin_e, vmax=max(vmax_e, vmin_e * 1.001))
-        cmap_e = plt.cm.viridis
+        hi = p_plot >= float(lat_prob_threshold)
+        lo = p_plot < float(lat_prob_threshold)
         if np.any(hi):
             ax_e.scatter(
                 t_plot[hi],
                 e_plot[hi],
-                c=e_plot[hi],
-                cmap=cmap_e,
-                norm=norm_e,
-                alpha=0.55,
-                s=14,
+                c="black",
+                s=12,
                 zorder=6,
                 edgecolors="none",
             )
         if np.any(lo):
-            # 空心点：略放大 + 加粗描边，并把 viridis 边色向深色压一点，便于在浅色直方底上看清，
-            # 仍用边线色相区分能量（与实心点同一 colormap）。
-            ce = np.asarray(cmap_e(norm_e(e_plot[lo])), dtype=float)
-            if ce.ndim == 1:
-                ce = ce.reshape(1, -1)
-            edge_rgba = ce.copy()
-            edge_rgba[:, :3] = np.clip(0.52 * ce[:, :3] + 0.48 * 0.1, 0.0, 1.0)
-            edge_rgba[:, 3] = np.clip(ce[:, 3] * 0.85 + 0.2, 0.72, 1.0)
             ax_e.scatter(
                 t_plot[lo],
                 e_plot[lo],
-                s=22,
+                s=50,
                 facecolors="none",
-                edgecolors=edge_rgba,
-                linewidths=1.85,
-                alpha=1.0,
+                edgecolors="black",
+                linewidths=1.2,
                 zorder=5,
             )
-        ann_lo = p_plot < float(lat_prob_threshold)
-        if np.any(ann_lo):
-            for _t, _e, _p in zip(
-                t_plot[ann_lo],
-                e_plot[ann_lo],
-                p_plot[ann_lo],
-            ):
-                ax_e.annotate(
-                    f"{float(_p):.2f}",
-                    (_t, _e),
-                    xytext=(4, 4),
-                    textcoords="offset points",
-                    fontsize=7.5,
-                    ha="left",
-                    va="bottom",
-                    color="0.12",
-                    zorder=8,
-                    clip_on=True,
-                )
         ax_e.set_yscale("log")
         if lat_emin_mev > 0:
             ax_e.set_ylim(bottom=lat_emin_mev)
-        ax_e.set_ylabel("Energy [MeV]")
+        ax_e.set_ylabel("Energy [MeV]", fontsize=15)
+        ax_e.tick_params(axis="y", which="major", labelsize=13)
+        ax_e.tick_params(axis="y", which="minor", labelsize=11)
         bottom_ax = ax_lat
     else:
         bottom_ax = axes[2]
 
-    shade_active_interval(list(axes), nai_builders[0])
+    interval_for_plot = active_interval
+    shade_active_interval(list(axes), nai_builders[0], active_interval=interval_for_plot)
+    shade_time_segments(list(axes), special_time_segments)
 
     bins_to_annotate = resolve_spectral_time_bins_for_lightcurve(
         bnname,
-        active_interval,
+        interval_for_plot,
         spectral_time_bins,
         fixed_num_time_bins=fixed_num_time_bins,
     )
-    if bins_to_annotate is not None:
+    # 当已经绘制了 special_time_segments 时，它们本身会带分段字母标注；
+    # 再叠加光谱分 bin 标注会导致 a/b/c... 重复绘制。
+    if bins_to_annotate is not None and not special_time_segments:
         annotate_spectral_time_bins(list(axes), bins_to_annotate)
 
     bottom_ax.set_xlabel("Time − T0 [s]")
+    axes[0].set_xlim(float(gbm_start), float(gbm_stop))
 
-    save_to = out_path if out_path is not None else f"{grb_name}_Lightcurve.png"
+    if out_path is not None:
+        save_to = out_path
+    else:
+        nai_tag = "_".join(
+            f"{lo:g}-{hi:g}".replace(".", "p") for lo, hi in nai_kev_bands
+        )
+        save_to = f"{grb_name}_lightcurve_{nai_tag}_{gbm_start:g}_{gbm_stop:g}.png"
     fig.savefig(str(save_to), dpi=dpi)
     plt.close(fig)
 

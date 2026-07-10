@@ -1,25 +1,34 @@
 # -*- coding: utf-8 -*-
-"""
-LAT Extended + GtBurst + threeML 全流程（由原 ``3MLprogram/new.py`` 迁入）。
+"""LAT Extended + GtBurst + threeML 的单文件简化版本。
 
-工作目录须设为 ``结果目录/{grb_name}/{bn_name}/``（由 :func:`run_lat_extended_three_ml_pipeline` 切换 cwd）。
-耗时较长，默认仅通过会话或 ``GRBRunOverrides.lat_three_ml_full`` 开启。
+这个版本尽量保持原有流水线能力，但把流程收敛成清晰的几步：
+1. 解析 FT1/FT2
+2. 构建 LAT 数据集并扫描 roi/zmax
+3. 读取事件并生成时间窗图
+4. 按时间段构建 LAT plugin
+5. 用 threeML 做最小化拟合并输出结果
+
+设计目标是和 `lk2.py` 一样：结构清晰、逻辑集中、尽量少分支、少重复。
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import multiprocessing as mp
 import os
+import shutil
 import sys
+import traceback
+import uuid
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Dict, Iterator, Optional
 
 import numpy as np
 import pandas as pd
-from astropy.io import fits as pyfits
 from astropy import units as u
+from astropy.io import fits as pyfits
 
 from threeML import (
     DataList,
@@ -27,7 +36,6 @@ from threeML import (
     Model,
     PointSource,
     Powerlaw_flux,
-    display_spectrum_model_counts,
     plot_spectra,
 )
 from threeML.io import update_logging_level
@@ -36,11 +44,11 @@ from threeML.utils.data_download.Fermi_LAT.download_LAT_data import LAT_dataset
 
 from GtBurst.dataHandling import _makeDatasetsOutOfLATdata
 
+from .gbm_core import _build_lat_gcn_t95_segments
 from .logging_utils import log
 from .runtime_env import ensure_analysis_runtime
-from .gbm_core import _build_lat_analysis_segments
 
-# 相对 ``analyze_single`` 的 ``[t0,t1]``，LAT 流水线在时间轴两侧各多取的秒数（建库 / 分档等）
+
 _LAT_PIPELINE_TIME_PAD_S = 5.0
 
 
@@ -56,8 +64,8 @@ def _working_directory(path: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _silence_process_stdio() -> Iterator[None]:
-    """屏蔽标准输出/错误（含子进程继承的 fd），用于 ``extract_events`` 等嘈杂步骤。"""
+def _silence_stdio() -> Iterator[None]:
+    """屏蔽标准输出/错误，避免底层库刷屏。"""
     sys.stdout.flush()
     sys.stderr.flush()
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
@@ -77,62 +85,70 @@ def _silence_process_stdio() -> Iterator[None]:
         os.close(devnull_fd)
 
 
-def _resolve_ft_paths(
-    grb_dir: str,
-    bn_name: str,
-    extended_data_dir: str,
-) -> tuple[str, str]:
-    """按 ``new.py`` 逻辑解析 FT1/FT2（含 EV00/SC00、FT1/SC00）。"""
-    ft1_file = os.path.join(grb_dir, f"gll_ft1_tr_{bn_name}_v00.fit")
-    ft2_file = os.path.join(grb_dir, f"gll_ft2_tr_{bn_name}_v00.fit")
+def _resolve_ft_paths(grb_dir: str, bn_name: str, extended_data_dir: str) -> tuple[str, str]:
+    """优先使用 `result_root/GRBname/bnname` 下的文件，不存在就从 Extended 目录复制一份过来。"""
+    target_dir = os.path.join(grb_dir, bn_name)
+    os.makedirs(target_dir, exist_ok=True)
 
-    if os.path.exists(ft1_file) and os.path.exists(ft2_file):
-        return ft1_file, ft2_file
+    ft1_local = os.path.join(target_dir, f"gll_ft1_tr_{bn_name}_v00.fit")
+    ft2_local = os.path.join(target_dir, f"gll_ft2_tr_{bn_name}_v00.fit")
+    if os.path.exists(ft1_local) and os.path.exists(ft2_local):
+        return ft1_local, ft2_local
+
+    source_candidates = [
+        (
+            os.path.join(grb_dir, f"gll_ft1_tr_{bn_name}_v00.fit"),
+            os.path.join(grb_dir, f"gll_ft2_tr_{bn_name}_v00.fit"),
+        ),
+        (
+            os.path.join(extended_data_dir, f"gll_ft1_tr_{bn_name}_v00.fit"),
+            os.path.join(extended_data_dir, f"gll_ft2_tr_{bn_name}_v00.fit"),
+        ),
+    ]
+    for src_ft1, src_ft2 in source_candidates:
+        if os.path.exists(src_ft1) and os.path.exists(src_ft2):
+            shutil.copy2(src_ft1, ft1_local)
+            shutil.copy2(src_ft2, ft2_local)
+            return ft1_local, ft2_local
 
     if not os.path.isdir(extended_data_dir):
-        raise FileNotFoundError(
-            f"缺少标准 gll 文件且 Extended 目录不存在: {extended_data_dir}"
-        )
+        raise FileNotFoundError(f"Extended 目录不存在: {extended_data_dir}")
 
     names = os.listdir(extended_data_dir)
-    ev_files = [
-        f
-        for f in names
-        if f.endswith("EV00.fits") and f.startswith("L")
-    ]
-    sc_files = [
-        f
-        for f in names
-        if f.endswith("SC00.fits") and f.startswith("L")
-    ]
-    ft1_files = [
-        f
-        for f in names
-        if f.endswith("FT1.fits") and f.startswith("L")
-    ]
+    ft1_candidates = [f for f in names if f.startswith("L") and f.endswith("FT1.fits")]
+    ev_candidates = [f for f in names if f.startswith("L") and f.endswith("EV00.fits")]
+    sc_candidates = [f for f in names if f.startswith("L") and f.endswith("SC00.fits")]
 
-    if ft1_files and sc_files:
-        log(
-            "使用 Extended_data_ex 中的 FT1/SC00: "
-            f"{ft1_files[0]}, {sc_files[0]}"
-        )
-        return (
-            os.path.join(extended_data_dir, ft1_files[0]),
-            os.path.join(extended_data_dir, sc_files[0]),
-        )
-    if ev_files and sc_files:
-        log(
-            "使用 Extended_data_ex 中的 EV00/SC00: "
-            f"{ev_files[0]}, {sc_files[0]}"
-        )
-        return (
-            os.path.join(extended_data_dir, ev_files[0]),
-            os.path.join(extended_data_dir, sc_files[0]),
-        )
+    if ft1_candidates and sc_candidates:
+        shutil.copy2(os.path.join(extended_data_dir, ft1_candidates[0]), ft1_local)
+        shutil.copy2(os.path.join(extended_data_dir, sc_candidates[0]), ft2_local)
+        return ft1_local, ft2_local
+    if ev_candidates and sc_candidates:
+        shutil.copy2(os.path.join(extended_data_dir, ev_candidates[0]), ft1_local)
+        shutil.copy2(os.path.join(extended_data_dir, sc_candidates[0]), ft2_local)
+        return ft1_local, ft2_local
 
     raise FileNotFoundError(
-        f"在 {extended_data_dir} 未找到 EV00/SC00 或 FT1/SC00 配对文件"
+        f"在 {extended_data_dir} 未找到可用的 FT1/FT2、FT1/SC00 或 EV00/SC00 文件"
     )
+
+
+def _build_analysis_segments(
+    t0_core: float,
+    t1_core: float,
+    t95: float,
+    analysis_bin_start: Optional[float],
+    analysis_bin_end: Optional[float],
+) -> list[dict[str, Any]]:
+    if analysis_bin_start is not None and analysis_bin_end is not None:
+        return [
+            {
+                "tstart": float(analysis_bin_start),
+                "tstop": float(analysis_bin_end),
+                "tag": "analysis_bin",
+            }
+        ]
+    return _build_lat_gcn_t95_segments(t0_core, t1_core, t95)
 
 
 def _analyze_gbm_aligned_time_window(
@@ -141,54 +157,366 @@ def _analyze_gbm_aligned_time_window(
     t0_s: float,
     t1_s: float,
 ) -> Dict[str, Any]:
-    """
-    在相对触发的时间轴上，统计与 ``analyze_single`` 中 ``t0``–``t1`` 重合时段内的 LAT 事例。
-
-    ``t0_s``/``t1_s`` 须与 ``selection["tstart"]`` / ``selection["tstop"]`` 一致（即单次分析里
-    所用的源时间窗，相对 MET 触发）。
-    """
-    t0_s = float(t0_s)
-    t1_s = float(t1_s)
     tt = np.asarray(event_times_rel_s, dtype=float)
     ee = np.asarray(energies_mev, dtype=float)
+    mask = (tt >= float(t0_s)) & (tt <= float(t1_s))
     n_tot = int(tt.size)
-    mask = (tt >= t0_s) & (tt <= t1_s)
-    n_in = int(np.sum(mask))
+    n_in = int(mask.sum())
+
     stats: Dict[str, Any] = {
-        "analysis_t0_s": t0_s,
-        "analysis_t1_s": t1_s,
+        "analysis_t0_s": float(t0_s),
+        "analysis_t1_s": float(t1_s),
         "window_duration_s": float(t1_s - t0_s),
         "n_events_total_filtered_file": n_tot,
         "n_events_in_analyze_single_window": n_in,
-        "fraction_events_in_window": (
-            float(n_in / n_tot) if n_tot > 0 else 0.0
-        ),
+        "fraction_events_in_window": float(n_in / n_tot) if n_tot > 0 else 0.0,
     }
     if n_in > 0:
         ew = ee[mask]
-        stats["mean_energy_MeV_in_window"] = float(np.mean(ew))
-        stats["median_energy_MeV_in_window"] = float(np.median(ew))
-        stats["max_energy_MeV_in_window"] = float(np.max(ew))
+        stats.update(
+            {
+                "mean_energy_MeV_in_window": float(np.mean(ew)),
+                "median_energy_MeV_in_window": float(np.median(ew)),
+                "max_energy_MeV_in_window": float(np.max(ew)),
+            }
+        )
     else:
-        stats["mean_energy_MeV_in_window"] = None
-        stats["median_energy_MeV_in_window"] = None
-        stats["max_energy_MeV_in_window"] = None
+        stats.update(
+            {
+                "mean_energy_MeV_in_window": None,
+                "median_energy_MeV_in_window": None,
+                "max_energy_MeV_in_window": None,
+            }
+        )
 
     pd.Series(stats).to_csv("lat_gbm_window_time_analysis.csv")
-    with open(
-        "lat_gbm_window_time_analysis.json",
-        "w",
-        encoding="utf-8",
-    ) as fj:
-        json.dump(stats, fj, indent=2, ensure_ascii=False)
-    log(
-        "LAT 时间窗统计（与 analyze_single 的 t0、t1 对齐）: "
-        f"[{t0_s:g}, {t1_s:g}] s → 窗内事例 {n_in}/{n_tot}"
-    )
+    with open("lat_gbm_window_time_analysis.json", "w", encoding="utf-8") as fh:
+        json.dump(stats, fh, indent=2, ensure_ascii=False)
+
+    log(f"LAT 时间窗统计: [{t0_s:g}, {t1_s:g}] s → {n_in}/{n_tot}")
     return stats
 
 
-def run_lat_extended_three_ml_pipeline(
+def _make_lat_event_figure(
+    *,
+    event_times: np.ndarray,
+    energies: np.ndarray,
+    t0_lat: float,
+    t1_lat: float,
+    t0_analysis: float,
+    t1_analysis: float,
+    t95: float,
+    output_path: str,
+    zoom: bool = False,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    et = np.asarray(event_times, dtype=float)
+    ee = np.asarray(energies, dtype=float)
+    if et.size:
+        tstart_ev = float(np.min(et)) - 15.0
+        tstop_ev = float(np.max(et)) + 15.0
+    else:
+        tstart_ev = t0_lat
+        tstop_ev = t1_lat
+
+    if zoom:
+        pad = max(0.05 * max(t1_lat - t0_lat, 1e-6), 1.0)
+        x0 = t0_lat - pad
+        x1 = t1_lat + pad
+        mask = (et >= x0) & (et <= x1)
+        plot_times = et[mask]
+        plot_energies = ee[mask]
+        bins = np.arange(x0, x1 + 2.0, 2.0)
+    else:
+        x0, x1 = tstart_ev, tstop_ev
+        plot_times = et
+        plot_energies = ee
+        bins = np.arange(tstart_ev, tstop_ev + 2.0, 2.0)
+
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
+    for ax in axs:
+        ax.axvspan(t0_lat, t1_lat, color="tab:orange", alpha=0.12, zorder=0)
+        ax.axvspan(t0_analysis, t1_analysis, color="tab:green", alpha=0.22, zorder=1)
+    if t0_analysis < t95 < t1_analysis:
+        for ax in axs:
+            ax.axvline(t95, color="tab:red", ls="--", lw=1.0, alpha=0.8, zorder=2)
+
+    if plot_times.size:
+        axs[0].hist(plot_times, bins=bins, histtype="stepfilled", color="C0", alpha=0.25)
+        axs[0].hist(plot_times, bins=bins, histtype="step", color="C0")
+        axs[1].scatter(plot_times, plot_energies, c=plot_energies, norm="log", s=18, alpha=0.55)
+
+    axs[0].set_ylabel("Events")
+    axs[1].set_yscale("log")
+    axs[1].set_ylabel("Energy [MeV]")
+    axs[1].set_xlabel("Time - T0 [s]")
+    axs[1].grid(True)
+
+    if zoom:
+        axs[0].set_xlim(x0, x1)
+        axs[0].set_title(
+            "LAT zoom window "
+            f"[{t0_analysis:g}, {t1_analysis:g}] s, pipeline [{t0_lat:g}, {t1_lat:g}] s"
+        )
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150 if zoom else 100)
+    plt.close(fig)
+
+
+def _scan_best_roi_zmax(lat_ds: LAT_dataset, irfs_sel: str, thetamax: float) -> tuple[int, int, list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    best_combo: Optional[tuple[int, int]] = None
+    best_n = -1
+
+    for zmax in range(100, 106):
+        for roi in range(1, 13):
+            with _silence_stdio():
+                lat_ds.extract_events(roi, zmax, irfs_sel, thetamax, strategy="time")
+            n_ev = int(lat_ds.nEvents)
+            rows.append({"zmax": zmax, "roi": roi, "nEvents": n_ev})
+            if n_ev > best_n:
+                best_n = n_ev
+                best_combo = (roi, zmax)
+
+    if best_combo is None:
+        raise RuntimeError("LAT extract_events 扫描未得到有效组合")
+
+    return best_combo[0], best_combo[1], rows
+
+
+def _build_lat_plugins(
+    *,
+    lat_name: str,
+    segments: list[dict[str, Any]],
+    roi: int,
+    zmax: int,
+    irfs_sel: str,
+    gtburst_data_repository: str,
+    grb_name: str,
+) -> Dict[str, Any]:
+    plugins: Dict[str, Any] = {}
+    for seg in segments:
+        builder = TransientLATDataBuilder(
+            grb_name,
+            outfile=f"{grb_name}_{seg['tag']}",
+            roi=float(roi),
+            tstarts=f"{float(seg['tstart']):.3f}",
+            tstops=f"{float(seg['tstop']):.3f}",
+            irf=irfs_sel,
+            zmax=float(zmax),
+            galactic_model="template",
+            particle_model="isotr template",
+            datarepository=gtburst_data_repository,
+        )
+        builder.display(get=True)
+        for lob in builder.run(include_previous_intervals=False):
+            key = f"LAT_{float(lob.tstart):.3f}-{float(lob.tstop):.3f}"
+            plugins[key] = lob.to_LATLike()
+    if not plugins:
+        raise RuntimeError("LAT 分析未生成任何 plugin")
+    return plugins
+
+
+def _fit_lat_plugins(
+    *,
+    plugins: Dict[str, Any],
+    segments: list[dict[str, Any]],
+    selection: Dict[str, Any],
+) -> Dict[str, Any]:
+    fit_results: Dict[str, Any] = {}
+    for seg in segments:
+        key = f"LAT_{float(seg['tstart']):.3f}-{float(seg['tstop']):.3f}"
+        plugin = plugins.get(key)
+        if plugin is None:
+            continue
+
+        model = Model(
+            PointSource(
+                "GRB",
+                ra=float(selection["ra"]),
+                dec=float(selection["dec"]),
+                spectral_shape=Powerlaw_flux(),
+            )
+        )
+        model.GRB.spectrum.main.Powerlaw_flux.a = 100.0 * u.MeV
+        model.GRB.spectrum.main.Powerlaw_flux.b = 100000.0 * u.MeV
+        model["GRB.spectrum.main.Powerlaw_flux.F"].bounds = (1e-7, 1e6)
+        model["GRB.spectrum.main.Powerlaw_flux.F"].value = 1e-5
+        model["GRB.spectrum.main.Powerlaw_flux.index"].value = -2.2
+        model["GRB.spectrum.main.Powerlaw_flux.index"].bounds = (-4, 0)
+
+        jl = JointLikelihood(model, DataList(plugin), verbose=False)
+        jl.set_minimizer("minuit")
+        jl.fit(compute_covariance=True)
+        fit_results[key] = jl
+
+    return fit_results
+
+
+def _save_spectra_plots(fit_results: Dict[str, Any], segments: list[dict[str, Any]]) -> None:
+    valid_jl = [jl for jl in fit_results.values() if jl is not None]
+    if not valid_jl:
+        return
+
+    fig = plot_spectra(
+        *[jl.results for jl in valid_jl],
+        ene_min=100 * u.MeV,
+        ene_max=100 * u.GeV,
+        flux_unit="MeV2/(cm2 s MeV)",
+        energy_unit="MeV",
+        fit_cmap="viridis",
+        contour_cmap="viridis",
+    )
+    fig.set_size_inches(10, 8)
+    fig.savefig("spectra.png")
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+
+    try:
+        seg_t0 = min(float(s["tstart"]) for s in segments)
+        seg_t1 = max(float(s["tstop"]) for s in segments)
+        xv: list[float] = []
+        dxv: list[float] = []
+        yv = {"F": [], "F_n": [], "F_p": [], "index": [], "index_n": [], "index_p": []}
+
+        for seg in segments:
+            key = f"LAT_{float(seg['tstart']):.3f}-{float(seg['tstop']):.3f}"
+            jl = fit_results.get(key)
+            xv.append((float(seg["tstart"]) + float(seg["tstop"])) / 2)
+            dxv.append((float(seg["tstop"]) - float(seg["tstart"])) / 2)
+            if jl is None:
+                for arr in yv.values():
+                    arr.append(np.nan)
+                continue
+
+            res = jl.results
+            for name in ("F", "index"):
+                mv = res.get_variates(f"GRB.spectrum.main.Powerlaw_flux.{name}")
+                lo, hi = mv.equal_tail_interval()
+                yv[name].append(mv.median)
+                yv[f"{name}_n"].append(mv.median - lo)
+                yv[f"{name}_p"].append(hi - mv.median)
+
+        import matplotlib.pyplot as plt
+
+        fig_v = plt.figure(figsize=(8, 10))
+        for ii, name in enumerate(("F", "index"), start=1):
+            plt.subplot(2, 1, ii)
+            plt.errorbar(
+                xv,
+                yv[name],
+                xerr=dxv,
+                yerr=(yv[f"{name}_n"], yv[f"{name}_p"]),
+                ls="",
+                c="r" if name == "F" else "b",
+            )
+            if name == "F":
+                plt.yscale("log")
+            else:
+                plt.ylim(-4, 0)
+            plt.ylabel("Flux" if name == "F" else "index")
+            plt.xlim(seg_t0, seg_t1)
+        fig_v.savefig("variates.png")
+        plt.close(fig_v)
+    except Exception as exc:  # noqa: BLE001
+        log(f"variates 图绘制跳过: {exc}")
+
+
+def _result_summary_text(result_data: Dict[str, Any]) -> str:
+    template = dedent(
+        """\
+        事件 {grb}
+        ra = {ra}
+        dec = {dec}
+        分析事件段： tstart = {tstart} tstop = {tstop}
+        t95 = {t95}
+        roi = {roi}
+        zmax = {zmax}
+        irf = {irf}
+        Pindex = {photonIndex} +/- {photonIndexError}
+        flux = {flux} +/- {fluxError}
+        photonFlux = {photonFlux} +/- {photonFluxError}
+
+        ==================================================
+        高能光子信息：
+
+        能量 = {global_highest_energy} MeV
+        概率 = {global_highest_prob}
+        相对时间 = {global_highest_relative_time} s
+
+        总高概率光子数 = {total_high_prob_photons}
+        """
+    )
+    safe_keys = [
+        "grb",
+        "ra",
+        "dec",
+        "tstart",
+        "tstop",
+        "t95",
+        "roi",
+        "zmax",
+        "irf",
+        "photonIndex",
+        "photonIndexError",
+        "flux",
+        "fluxError",
+        "photonFlux",
+        "photonFluxError",
+        "global_highest_energy",
+        "global_highest_prob",
+        "global_highest_relative_time",
+        "total_high_prob_photons",
+    ]
+    safe = {k: result_data.get(k, "") for k in safe_keys}
+    return template.format(**safe)
+
+
+def _extract_highest_photon_info(event_file: pyfits.HDUList, trigger_time: float) -> Dict[str, Any]:
+    events = event_file["EVENTS"].data
+    if len(events) == 0:
+        return {}
+
+    times = np.asarray(events["TIME"], dtype=float)
+    energies = np.asarray(events["ENERGY"], dtype=float)
+    rel_times = times - float(trigger_time)
+
+    out: Dict[str, Any] = {
+        "global_highest_energy": float(np.max(energies)),
+        "global_highest_relative_time": float(rel_times[int(np.argmax(energies))]),
+    }
+
+    if "GRB" in events.columns.names:
+        prob = np.asarray(events["GRB"], dtype=float)
+        hi_mask = prob > 0.9
+        out["total_high_prob_photons"] = int(np.sum(hi_mask))
+        if np.any(hi_mask):
+            idx = int(np.argmax(energies[hi_mask]))
+            hi_events = events[hi_mask]
+            hi_prob = prob[hi_mask]
+            out["global_highest_prob"] = float(hi_prob[idx])
+            out["global_highest_energy"] = float(hi_events["ENERGY"][idx])
+            out["global_highest_relative_time"] = float(
+                float(hi_events["TIME"][idx]) - float(trigger_time)
+            )
+        else:
+            out["global_highest_prob"] = ""
+    else:
+        out["global_highest_prob"] = ""
+        out["total_high_prob_photons"] = 0
+
+    return out
+
+
+def _run_lat_extended_three_ml_impl(
     *,
     bn_dir: str,
     bn_name: str,
@@ -196,33 +524,15 @@ def run_lat_extended_three_ml_pipeline(
     selection: Dict[str, Any],
     result_parent: str,
     extended_data_dir: str,
-    intervals_count: int = 4,
-    fixed_num_time_bins: Optional[int] = None,
+    analysis_bin_start: Optional[float],
+    analysis_bin_end: Optional[float],
+    return_lat_plugin: bool,
 ) -> Dict[str, Any]:
-    """
-    执行原 ``new.py`` LAT 扩展分析（需在环境中已安装 GtBurst / fermitools）。
-
-    :param bn_dir: ``…/{result_root}/{grb_name}/{bn_name}/``，处理期间会切换到此目录
-    :param bn_name: GBM 触发名，如 ``bn231129799``
-    :param grb_name: GCN 名，如 ``GRB231129C``
-    :param selection: 须含 tstart, tstop, ra, dec, trigger_time；可选 irfs, data_type, Emin, Emax。
-        其中 **tstart/tstop** 为 ``analyze_single`` 的 **t0/t1**（相对触发，秒）；本函数会在其两侧各扩展
-        ``_LAT_PIPELINE_TIME_PAD_S`` 秒用于 LAT 建库与分段时间轴，统计与图中绿色带仍对应原始
-        ``[tstart, tstop]``。
-    :param result_parent: ``LAT_dataset.make_LAT_dataset`` 的 destination_directory（一般为 ``…/{grb_name}``）。
-        GtBurst / ``TransientLATDataBuilder`` 会在其下查找 ``{result_parent}/{bn_name}/``（例如
-        ``…/GRB231129C/bn231129799/``），故 **不可** 把 ``datarepository`` 设为当前工作目录 ``bn_dir``。
-    :param extended_data_dir: 复制前的 Extended 目录 ``…/Extended_data_ex/{grb_name}``
-    :param fixed_num_time_bins: 与 ``analyze_single`` 相同；默认 ``None`` 表示整段一个 bin
-    """
-    ensure_analysis_runtime()
-    update_logging_level("INFO")
-
     result_data: Dict[str, Any] = {}
 
+    bn_dir = os.path.join(bn_dir, bn_name)
+
     with _working_directory(bn_dir):
-        os.makedirs(bn_dir, exist_ok=True)
-        # GtBurst：join(datarepository, bn_name, …)；cwd 为 bn_dir 时不可用 "."。
         gtburst_data_repository = os.path.abspath(result_parent)
 
         t0_core = float(selection["tstart"])
@@ -230,16 +540,13 @@ def run_lat_extended_three_ml_pipeline(
         t0_lat = t0_core - _LAT_PIPELINE_TIME_PAD_S
         t1_lat = t1_core + _LAT_PIPELINE_TIME_PAD_S
         log(
-            "LAT 时间轴：analyze_single [t0,t1] "
-            f"[{t0_core:g}, {t1_core:g}] s → 流水线扩展 ±{_LAT_PIPELINE_TIME_PAD_S:g} s 为 "
-            f"[{t0_lat:g}, {t1_lat:g}] s（相对触发）"
+            "LAT 时间轴：GCN [T0,T1] "
+            f"[{t0_core:g}, {t1_core:g}] s → 扩展 ±{_LAT_PIPELINE_TIME_PAD_S:g} s 为 "
+            f"[{t0_lat:g}, {t1_lat:g}] s"
         )
 
-        ft1_file, ft2_file = _resolve_ft_paths(
-            bn_dir, bn_name, extended_data_dir
-        )
-
-        _, eboundsFilename, _, cspecfile = _makeDatasetsOutOfLATdata(
+        ft1_file, ft2_file = _resolve_ft_paths(bn_dir, bn_name, extended_data_dir)
+        _makeDatasetsOutOfLATdata(
             ft1_file,
             ft2_file,
             bn_name,
@@ -251,8 +558,8 @@ def run_lat_extended_three_ml_pipeline(
             bn_dir,
         )
 
-        my_lat = LAT_dataset()
-        my_lat.make_LAT_dataset(
+        lat_ds = LAT_dataset()
+        lat_ds.make_LAT_dataset(
             selection["ra"],
             selection["dec"],
             12,
@@ -266,576 +573,215 @@ def run_lat_extended_three_ml_pipeline(
         )
 
         t05 = float(selection.get("t05", 0.0))
-        if float(selection.get("t90", 0.0)) > 0:
-            t95 = round(float(selection["t90"]) + t05, 1)
-        else:
-            t95 = 0.0
+        t95 = round(float(selection["t90"]) + t05, 1) if float(selection.get("t90", 0.0)) > 0 else 0.0
+        irfs_sel = selection.get("irfs", "p8_transient020e")
+        thetamax = float(selection.get("thetamax", 180.0))
 
-        thetamax = 180.0
-        irfs_sel = selection.get("irfs", "p8_transient010e")
-        strategy = "time"
+        roi, zmax, scan_rows = _scan_best_roi_zmax(lat_ds, irfs_sel, thetamax)
+        with _silence_stdio():
+            lat_ds.extract_events(roi, zmax, irfs_sel, thetamax, strategy="time")
 
-        results_scan = []
-        best_n = 0
-        best_combo: Optional[tuple[int, int]] = None
+        result_data.update({"roi": roi, "zmax": zmax, "irf": irfs_sel})
+        scan_preview = pd.DataFrame(scan_rows).sort_values("nEvents", ascending=False).head().to_string(index=False)
+        log("LAT roi/zmax 扫描前几名:\n" + scan_preview)
 
-        for zmax_i in range(100, 106):
-            for roi_i in range(1, 13):
-                with _silence_process_stdio():
-                    my_lat.extract_events(
-                        roi_i, zmax_i, irfs_sel, thetamax, strategy=strategy
-                    )
-                n_ev = my_lat.nEvents
-                results_scan.append(
-                    {"zmax": zmax_i, "roi": roi_i, "nEvents": n_ev}
-                )
-                if n_ev > best_n:
-                    best_n = n_ev
-                    best_combo = (roi_i, zmax_i)
+        with pyfits.open(lat_ds.filt_file) as event_file:
+            events = event_file["EVENTS"].data
+            event_times = np.asarray(events["TIME"], dtype=float) - float(selection["trigger_time"])
+            energies = np.asarray(events["ENERGY"], dtype=float)
+            result_data.update(_extract_highest_photon_info(event_file, selection["trigger_time"]))
 
-        if best_combo is None:
-            raise RuntimeError("LAT extract_events 扫描未得到有效组合")
+        t0_analysis = float(analysis_bin_start) if analysis_bin_start is not None else t0_core
+        t1_analysis = float(analysis_bin_end) if analysis_bin_end is not None else t1_core
+        if analysis_bin_start is not None and analysis_bin_end is not None:
+            log(f"LAT 使用 analyze_single 时间窗: [{t0_analysis:g}, {t1_analysis:g}] s")
 
-        roi, zmax = best_combo
-        with _silence_process_stdio():
-            my_lat.extract_events(
-                roi, zmax, irfs_sel, thetamax, strategy=strategy
-            )
-
-        result_data["roi"] = roi
-        result_data["zmax"] = zmax
-
-        df_scan = pd.DataFrame(results_scan)
-        log("LAT roi/zmax 扫描前几名:\n" + df_scan.sort_values(
-            "nEvents", ascending=False
-        ).head().to_string())
-
-        with pyfits.open(my_lat.filt_file) as event_file:
-            lat_events = event_file["EVENTS"].data
-        event_times = lat_events["TIME"] - float(selection["trigger_time"])
-
-        # 与 analyze_single 中 t0、t1 完全一致的核心分析窗（图中绿色带、窗内统计）
-        t0_analysis = t0_core
-        t1_analysis = t1_core
-        result_data["analyze_single_t0_s"] = t0_core
-        result_data["analyze_single_t1_s"] = t1_core
-        result_data["lat_pipeline_t0_s"] = t0_lat
-        result_data["lat_pipeline_t1_s"] = t1_lat
-        result_data["lat_pipeline_pad_each_side_s"] = _LAT_PIPELINE_TIME_PAD_S
-        energies_arr = np.asarray(lat_events["ENERGY"], dtype=float)
-        win_stats = _analyze_gbm_aligned_time_window(
-            np.asarray(event_times, dtype=float),
-            energies_arr,
-            t0_analysis,
-            t1_analysis,
-        )
-        result_data.update(win_stats)
-
-        tstart_ev = max(
-            float(np.min(event_times)) - 15.0,
-            t0_lat,
-        )
-        tstop_ev = min(
-            float(np.max(event_times)) + 15.0,
-            t1_lat,
+        result_data.update(
+            {
+                "grb": grb_name,
+                "ra": selection["ra"],
+                "dec": selection["dec"],
+                "gcn_t0_s": t0_core,
+                "gcn_t1_s": t1_core,
+                "analysis_bin_start_s": t0_analysis,
+                "analysis_bin_end_s": t1_analysis,
+                "lat_pipeline_t0_s": t0_lat,
+                "lat_pipeline_t1_s": t1_lat,
+                "lat_pipeline_pad_each_side_s": _LAT_PIPELINE_TIME_PAD_S,
+                "T95": t95,
+            }
         )
 
-        bin_width_s = 2.0
-        intervals = np.arange(
-            tstart_ev, tstop_ev + bin_width_s, bin_width_s
-        )
+        result_data.update(_analyze_gbm_aligned_time_window(event_times, energies, t0_analysis, t1_analysis))
 
-        analysis_segments = _build_lat_analysis_segments(
-            bn_name,
-            t0_core,
-            t1_core,
-            fixed_num_time_bins=fixed_num_time_bins,
-        )
-        log(
-            "LAT 瞬态分析时段（与 analyze_single 一致，另含各段全程）: "
-            + ", ".join(
-                f"[{s['tstart']:g},{s['tstop']:g}] ({s['tag']})"
-                for s in analysis_segments
-            )
-        )
+        analysis_segments = _build_analysis_segments(t0_core, t1_core, t95, analysis_bin_start, analysis_bin_end)
+        if not analysis_segments:
+            raise RuntimeError(f"GCN 时间窗无效: T0={t0_core:g}, T1={t1_core:g}, t95={t95:g}")
         result_data["analysis_segments"] = analysis_segments
+        log("LAT 瞬态分析时段: " + ", ".join(f"[{s['tstart']:g},{s['tstop']:g}] ({s['tag']})" for s in analysis_segments))
 
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, axs = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
-        _pad_lab = f"LAT pipeline ±{_LAT_PIPELINE_TIME_PAD_S:g}s"
-        for ax in axs:
-            ax.axvspan(
-                t0_lat,
-                t1_lat,
-                alpha=0.12,
-                color="tab:orange",
-                zorder=0,
-                label=_pad_lab,
-            )
-            ax.axvspan(
-                t0_analysis,
-                t1_analysis,
-                alpha=0.22,
-                color="tab:green",
-                zorder=1,
-                label="analyze_single [t0,t1]",
-            )
-        for seg in analysis_segments:
-            if seg["tag"].startswith("bin_"):
-                axs[0].axvline(
-                    seg["tstart"],
-                    color="tab:red",
-                    ls=":",
-                    lw=0.8,
-                    alpha=0.45,
-                    zorder=2,
-                )
-                axs[0].axvline(
-                    seg["tstop"],
-                    color="tab:red",
-                    ls=":",
-                    lw=0.8,
-                    alpha=0.45,
-                    zorder=2,
-                )
-        axs[0].hist(
-            event_times,
-            bins=intervals,
-            histtype="stepfilled",
-            alpha=0.25,
-            color="C0",
+        _make_lat_event_figure(
+            event_times=event_times,
+            energies=energies,
+            t0_lat=t0_lat,
+            t1_lat=t1_lat,
+            t0_analysis=t0_analysis,
+            t1_analysis=t1_analysis,
+            t95=t95,
+            output_path="events.png",
+            zoom=False,
         )
-        axs[0].hist(event_times, bins=intervals, histtype="step", color="C0")
-        axs[0].set_ylabel("Events")
-        axs[1].scatter(
-            event_times,
-            lat_events["ENERGY"],
-            marker="o",
-            c=lat_events["ENERGY"],
-            norm="log",
-            alpha=0.5,
-            zorder=20,
+        _make_lat_event_figure(
+            event_times=event_times,
+            energies=energies,
+            t0_lat=t0_lat,
+            t1_lat=t1_lat,
+            t0_analysis=t0_analysis,
+            t1_analysis=t1_analysis,
+            t95=t95,
+            output_path="events_analyze_single_window.png",
+            zoom=True,
         )
-        axs[1].set_yscale("log")
-        axs[1].set_ylabel("Energy [MeV]")
-        axs[1].set_xlabel("Time - T0 [s]")
-        axs[1].grid(True)
-        h0, l0 = axs[0].get_legend_handles_labels()
-        if h0:
-            axs[0].legend(h0, l0, loc="upper right", fontsize=9)
-        fig.savefig("events.png")
-        plt.close(fig)
 
-        # 聚焦扩展后的 LAT 窗附近（含 ±pad），核心 [t0,t1] 仍以绿色标出
-        dur_ext = max(t1_lat - t0_lat, 1e-6)
-        pad_ext = max(0.05 * dur_ext, 1.0)
-        x0_win = t0_lat - pad_ext
-        x1_win = t1_lat + pad_ext
-        et = np.asarray(event_times, dtype=float)
-        mask_w = (et >= x0_win) & (et <= x1_win)
-        tw = et[mask_w]
-        ew = energies_arr[mask_w]
-        bins_w = np.arange(x0_win, x1_win + bin_width_s, bin_width_s)
-
-        fig_w, axw = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
-        for ax in axw:
-            ax.axvspan(
-                t0_lat,
-                t1_lat,
-                alpha=0.12,
-                color="tab:orange",
-                zorder=0,
-            )
-            ax.axvspan(
-                t0_analysis,
-                t1_analysis,
-                alpha=0.22,
-                color="tab:green",
-                zorder=1,
-            )
-        if tw.size:
-            axw[0].hist(tw, bins=bins_w, histtype="stepfilled", alpha=0.3, color="C0")
-            axw[0].hist(tw, bins=bins_w, histtype="step", color="C0")
-            axw[1].scatter(
-                tw,
-                ew,
-                marker="o",
-                c=ew,
-                norm="log",
-                alpha=0.55,
-                zorder=20,
-            )
-        axw[0].set_ylabel("Events")
-        axw[0].set_title(
-            "LAT: core [t0,t1] "
-            f"[{t0_analysis:g},{t1_analysis:g}] s; pipeline "
-            f"±{_LAT_PIPELINE_TIME_PAD_S:g}s → "
-            f"[{t0_lat:g},{t1_lat:g}] s (relative to trigger)"
+        plugins = _build_lat_plugins(
+            lat_name=bn_name,
+            segments=analysis_segments,
+            roi=roi,
+            zmax=zmax,
+            irfs_sel=irfs_sel,
+            gtburst_data_repository=gtburst_data_repository,
+            grb_name=lat_ds.grb_name,
         )
-        axw[1].set_yscale("log")
-        axw[1].set_ylabel("Energy [MeV]")
-        axw[1].set_xlabel("Time - T0 [s]")
-        axw[1].grid(True)
-        axw[0].set_xlim(x0_win, x1_win)
-        fig_w.tight_layout()
-        fig_w.savefig("events_analyze_single_window.png", dpi=150)
-        plt.close(fig_w)
+        primary_key = next(iter(plugins))
+        result_data["lat_plugin_key"] = primary_key
+        result_data["lat_plugin"] = plugins[primary_key]
 
-        result_data["T95"] = t95
+        fit_results = _fit_lat_plugins(plugins=plugins, segments=analysis_segments, selection=selection)
+        _save_spectra_plots(fit_results, analysis_segments)
 
-        lat_observations: list[list[Any]] = []
-        for seg in analysis_segments:
-            t0_seg = float(seg["tstart"])
-            t1_seg = float(seg["tstop"])
-            tag = str(seg["tag"])
-            if tag.startswith("full") and "block" not in tag:
-                outfile = f"{my_lat.grb_name}_all"
-            else:
-                outfile = f"{my_lat.grb_name}_{tag}"
-
-            builder_seg = TransientLATDataBuilder(
-                my_lat.grb_name,
-                outfile=outfile,
-                roi=float(roi),
-                tstarts=f"{t0_seg:.1f}",
-                tstops=f"{t1_seg:.1f}",
-                irf=irfs_sel,
-                zmax=float(zmax),
-                galactic_model="template",
-                particle_model="isotr template",
-                datarepository=gtburst_data_repository,
-            )
-            builder_seg.display(get=True)
-            obs_seg = builder_seg.run(include_previous_intervals=False)
-            lat_observations.append(obs_seg)
-
-        lat_plugins: Dict[str, Any] = {}
-        for obs_list in lat_observations:
-            for lob in obs_list:
-                lat_name = "LAT_%.1f-%.1f" % (
-                    float(lob.tstart),
-                    float(lob.tstop),
-                )
-                lat_plugins[lat_name] = lob.to_LATLike()
-
-        fit_results: Dict[str, Any] = {}
-        for seg in analysis_segments:
-            T0_i = float(seg["tstart"])
-            T1_i = float(seg["tstop"])
-            lat_name = "LAT_%.1f-%.1f" % (T0_i, T1_i)
-            prob_path = (
-                f"./interval{T0_i:.1f}-{T1_i:.1f}/"
-                f"gll_ft1_tr_bn{my_lat.grb_name}_v00_filt_prob.fit"
-            )
-            if lat_name not in lat_plugins:
-                fit_results[lat_name] = None
-                continue
-
-            if os.path.exists(prob_path):
-                ts_path = (
-                    f"./interval{T0_i:.1f}-{T1_i:.1f}/source_TS.txt"
-                )
-                data_ts: Dict[str, str] = {}
-                try:
-                    with open(ts_path, encoding="utf-8") as fts:
-                        for ln in fts:
-                            ln = ln.strip()
-                            if not ln:
-                                continue
-                            parts = [p.strip() for p in ln.split(",")]
-                            if len(parts) >= 2:
-                                data_ts[parts[0]] = parts[1]
-                except OSError:
-                    fit_results[lat_name] = None
-                    continue
-
-                if "GRB" not in data_ts:
-                    fit_results[lat_name] = None
-                    continue
-                grb_ts = float(data_ts["GRB"])
-                if grb_ts > 16:
-                    grb = PointSource(
-                        "GRB",
-                        ra=float(selection["ra"]),
-                        dec=float(selection["dec"]),
-                        spectral_shape=Powerlaw_flux(),
-                    )
-                    model = Model(grb)
-                    model.GRB.spectrum.main.Powerlaw_flux.a = 100.0 * u.MeV
-                    model.GRB.spectrum.main.Powerlaw_flux.b = 100000.0 * u.MeV
-                    model.GRB.spectrum.main.Powerlaw_flux.F = 1.0
-
-                    datalist = DataList(lat_plugins[lat_name])
-                    model[
-                        "GRB.spectrum.main.Powerlaw_flux.F"
-                    ].bounds = (1e-7, 1e6)
-                    model[
-                        "GRB.spectrum.main.Powerlaw_flux.F"
-                    ].value = 1e-5
-                    model[
-                        "GRB.spectrum.main.Powerlaw_flux.index"
-                    ].value = -2.2
-                    model[
-                        "GRB.spectrum.main.Powerlaw_flux.index"
-                    ].bounds = (-4, 0)
-                    jl = JointLikelihood(model, datalist, verbose=False)
-                    jl.set_minimizer("minuit")
-                    jl.fit(compute_covariance=True)
-                    fit_results[lat_name] = jl
-                else:
-                    fit_results[lat_name] = None
-            else:
-                fit_results[lat_name] = None
-
-        for seg in analysis_segments:
-            T0_i = float(seg["tstart"])
-            T1_i = float(seg["tstop"])
-            lat_name = f"LAT_{T0_i:.1f}-{T1_i:.1f}"
-            jl_i = fit_results.get(lat_name)
-            if jl_i is not None:
-                fig_sp = display_spectrum_model_counts(
-                    jl_i, figsize=(10, 8)
-                )
-                fig_sp.savefig(
-                    f"{lat_name}_{seg['tag']}_spectrum.png",
-                    dpi=300,
-                    bbox_inches="tight",
-                )
-                plt.close(fig_sp)
-
-        valid_jl = [x for x in fit_results.values() if x is not None]
+        valid_jl = [jl for jl in fit_results.values() if jl is not None]
         if valid_jl:
-            fig_sp2 = plot_spectra(
-                *[a.results for a in valid_jl],
-                ene_min=100 * u.MeV,
-                ene_max=100 * u.GeV,
-                flux_unit="MeV2/(cm2 s MeV)",
-                energy_unit="MeV",
-                fit_cmap="viridis",
-                contour_cmap="viridis",
-                contour_style_kwargs=dict(alpha=0.1),
-            )
-            fig_sp2.set_size_inches(10, 8)
-            fig_sp2.savefig("spectra.png")
-            plt.close(fig_sp2)
-
-        variates = ["F", "index"]
-        yv: Dict[str, list] = {n: [] for n in variates}
-        for n in variates:
-            yv[n + "_p"] = []
-            yv[n + "_n"] = []
-        xv: list[float] = []
-        dxv: list[float] = []
-
-        try:
-            for seg in analysis_segments:
-                T0_i = float(seg["tstart"])
-                T1_i = float(seg["tstop"])
-                lat_name = "LAT_%.1f-%.1f" % (T0_i, T1_i)
-                xv.append((T1_i + T0_i) / 2)
-                dxv.append((T1_i - T0_i) / 2)
-                jl_i = fit_results.get(lat_name)
-                if jl_i is not None:
-                    res = jl_i.results
-                    for n in variates:
-                        mv = res.get_variates(
-                            "GRB.spectrum.main.Powerlaw_flux.%s" % n
-                        )
-                        yv[n].append(mv.median)
-                        lo, hi = mv.equal_tail_interval()
-                        yv[n + "_p"].append(hi - mv.median)
-                        yv[n + "_n"].append(mv.median - lo)
-                else:
-                    for n in variates:
-                        yv[n].append(np.nan)
-                        yv[n + "_p"].append(np.nan)
-                        yv[n + "_n"].append(np.nan)
-            if xv:
-                fig_v = plt.figure(figsize=(8, 12))
-                colors_v = ["r", "b"]
-                ylabels_v = [
-                    "Flux [100MeV - 10GeV] \n $\\gamma$ cm$^{-2}$ s$^{-1}$",
-                    "index",
-                ]
-                for ii, n in enumerate(variates):
-                    plt.subplot(len(variates) + 1, 1, ii + 1)
-                    plt.errorbar(
-                        xv,
-                        yv[n],
-                        xerr=dxv,
-                        yerr=(yv[n + "_n"], yv[n + "_p"]),
-                        ls="",
-                        c=colors_v[ii],
-                    )
-                    if ii == 0:
-                        plt.yscale("log")
-                    if ii == 1:
-                        plt.ylim(-4, 0)
-                    plt.ylabel(ylabels_v[ii])
-                    seg_t0 = min(s["tstart"] for s in analysis_segments)
-                    seg_t1 = max(s["tstop"] for s in analysis_segments)
-                    plt.xlim(seg_t0, seg_t1)
-                fig_v.savefig("variates.png")
-                plt.close(fig_v)
-        except Exception as exc:  # noqa: BLE001
-            log(f"variates 图绘制跳过: {exc}")
-
-        prob_files: list[str] = []
-        for obs_list in lat_observations:
-            for lob in obs_list:
-                pp = (
-                    f"interval{lob.tstart}-{lob.tstop}/"
-                    f"gll_ft1_tr_bn{my_lat.grb_name}_v00_filt_prob.fit"
-                )
-                if os.path.exists(pp):
-                    prob_files.append(pp)
-
-        all_highest: list[Dict[str, Any]] = []
-        glob_hi = None
-        glob_prob = None
-        glob_rtime = None
-
-        for prob_file in prob_files:
-            with pyfits.open(prob_file) as hdul:
-                events = hdul["EVENTS"].data
-                prob = events["GRB"]
-                rel_t = events["TIME"] - float(selection["trigger_time"])
-
-                df_all = pd.DataFrame(
-                    {
-                        "ENERGY": events["ENERGY"],
-                        "TIME": events["TIME"],
-                        "RELATIVE_TIME": rel_t,
-                        "PROB": prob,
-                        "RA": events["RA"],
-                        "DEC": events["DEC"],
-                    }
-                )
-                csv_all = "all_photon.csv"
-                df_all.to_csv(
-                    csv_all,
-                    index=False,
-                    mode="a",
-                    header=not os.path.exists(csv_all),
-                )
-
-                mask_hi = prob > 0.9
-                hi_ev = events[mask_hi]
-                hi_pr = prob[mask_hi]
-                if len(hi_ev["ENERGY"]) == 0:
-                    continue
-
-                rel_hi = hi_ev["TIME"] - float(selection["trigger_time"])
-                pd.DataFrame(
-                    {
-                        "ENERGY": hi_ev["ENERGY"],
-                        "TIME": hi_ev["TIME"],
-                        "RELATIVE_TIME": rel_hi,
-                        "PROB": hi_pr,
-                        "RA": hi_ev["RA"],
-                        "DEC": hi_ev["DEC"],
-                    }
-                ).to_csv(
-                    "all_high_prob.csv",
-                    index=False,
-                    mode="a",
-                    header=not os.path.exists("all_high_prob.csv"),
-                )
-
-                midx = int(np.argmax(hi_ev["ENERGY"]))
-                hp = hi_ev[midx]
-                hprob = float(hi_pr[midx])
-                hrt = float(hp["TIME"]) - float(selection["trigger_time"])
-
-                all_highest.append(
-                    {
-                        "ENERGY": hp["ENERGY"],
-                        "TIME": hp["TIME"],
-                        "RELATIVE_TIME": hrt,
-                        "PROB": hprob,
-                        "RA": hp["RA"],
-                        "DEC": hp["DEC"],
-                        "INTERVAL_FILE": prob_file,
-                    }
-                )
-
-                if glob_hi is None or hp["ENERGY"] > glob_hi["ENERGY"]:
-                    glob_hi = hp
-                    glob_prob = hprob
-                    glob_rtime = hrt
-
-        if all_highest:
-            pd.DataFrame(all_highest).to_csv(
-                "highest_photon_per_interval.csv", index=False
+            res = valid_jl[0].results
+            flux_var = res.get_variates("GRB.spectrum.main.Powerlaw_flux.F")
+            idx_var = res.get_variates("GRB.spectrum.main.Powerlaw_flux.index")
+            flux_lo, flux_hi = flux_var.equal_tail_interval()
+            idx_lo, idx_hi = idx_var.equal_tail_interval()
+            result_data.update(
+                {
+                    "flux": flux_var.median,
+                    "fluxError": max(flux_var.median - flux_lo, flux_hi - flux_var.median),
+                    "photonIndex": idx_var.median,
+                    "photonIndexError": max(idx_var.median - idx_lo, idx_hi - idx_var.median),
+                }
             )
 
-        result_data["grb"] = grb_name
-        result_data["t95"] = t95
-        result_data["ra"] = selection["ra"]
-        result_data["dec"] = selection["dec"]
-        result_data["tstart"] = tstart_ev
-        result_data["tstop"] = tstop_ev
-        result_data["irf"] = irfs_sel
+        # 额外信息尽量保留，但不强制依赖这些字段
+        result_data.setdefault("flux", "")
+        result_data.setdefault("fluxError", "")
+        result_data.setdefault("photonIndex", "")
+        result_data.setdefault("photonIndexError", "")
+        result_data.setdefault("photonFlux", "")
+        result_data.setdefault("photonFluxError", "")
+        result_data.setdefault("global_highest_energy", "")
+        result_data.setdefault("global_highest_prob", "")
+        result_data.setdefault("global_highest_relative_time", "")
+        result_data.setdefault("total_high_prob_photons", "")
 
-        if glob_hi is not None:
-            result_data["global_highest_energy"] = glob_hi["ENERGY"]
-            result_data["global_highest_prob"] = glob_prob
-            result_data["global_highest_relative_time"] = glob_rtime
-            ap = "all_high_prob.csv"
-            result_data["total_high_prob_photons"] = (
-                len(pd.read_csv(ap)) if os.path.isfile(ap) else 0
-            )
-
-        out_all = Path(f"{my_lat.grb_name}_all")
-        if out_all.is_file():
-            with out_all.open("r", encoding="utf-8") as fh:
-                hdr = fh.readline().split()
-                dat = fh.readline().split()
-            if hdr and dat and len(hdr) == len(dat):
-                result_data.update(dict(zip(hdr, dat)))
-
-        template = dedent(
-            """\
-            事件 {grb}
-            ra = {ra}
-            dec = {dec}
-            分析事件段： tstart = {tstart} tstop = {tstop}
-            t95 = {t95}
-            roi = {roi}
-            zmax = {zmax}
-            irf = {irf}
-            Pindex = {photonIndex} +/- {photonIndexError}
-            flux = {flux} +/- {fluxError}
-            photonFlux = {photonFlux} +/- {photonFluxError}
-
-            ==================================================
-            高能光子信息：
-
-            能量 = {global_highest_energy} MeV
-            概率 = {global_highest_prob}
-            相对时间 = {global_highest_relative_time} s
-
-            总高概率光子数 = {total_high_prob_photons}
-
-        """
+        Path(f"{grb_name}_fit_results.txt").write_text(
+            _result_summary_text(result_data),
+            encoding="utf-8",
         )
-
-        safe = {k: result_data.get(k, "") for k in [
-            "grb", "ra", "dec", "tstart", "tstop", "t95", "roi", "zmax",
-            "irf", "photonIndex", "photonIndexError", "flux", "fluxError",
-            "photonFlux", "photonFluxError",
-            "global_highest_energy", "global_highest_prob",
-            "global_highest_relative_time", "total_high_prob_photons",
-        ]}
-        out_txt = Path(f"{safe['grb']}_fit_results.txt")
-        try:
-            out_txt.write_text(template.format(**safe), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            log(f"写入拟合摘要失败（缺字段可忽略）: {exc}")
 
         log(f"LAT Extended threeML 流水线结束，输出目录: {bn_dir}")
+        result_data["working_directory"] = bn_dir
         return result_data
+
+
+def run_lat_extended_three_ml_pipeline(
+    *,
+    bn_dir: str,
+    bn_name: str,
+    grb_name: str,
+    selection: Dict[str, Any],
+    result_parent: str,
+    extended_data_dir: str,
+    fixed_num_time_bins: Optional[int] = None,
+    analysis_bin_start: Optional[float] = None,
+    analysis_bin_end: Optional[float] = None,
+    return_lat_plugin: bool = False,
+) -> Dict[str, Any]:
+    """对外暴露的入口；用子进程隔离底层库状态。"""
+    ensure_analysis_runtime()
+    update_logging_level("INFO")
+
+    start_method = "fork" if "fork" in mp.get_all_start_methods() else "spawn"
+    ctx = mp.get_context(start_method)
+    queue: mp.Queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_run_lat_extended_three_ml_worker,
+        args=(
+            queue,
+            bn_dir,
+            bn_name,
+            grb_name,
+            selection,
+            result_parent,
+            extended_data_dir,
+            fixed_num_time_bins,
+            analysis_bin_start,
+            analysis_bin_end,
+            return_lat_plugin,
+        ),
+        name=f"lat-ext-{bn_name}-{uuid.uuid4().hex[:8]}",
+    )
+    proc.start()
+    proc.join()
+
+    if not queue.empty():
+        status, payload = queue.get()
+    else:
+        status, payload = ("error", {"error": f"LAT 子进程无返回值，exitcode={proc.exitcode}"})
+
+    if proc.exitcode != 0:
+        if status == "ok":
+            return payload
+        raise RuntimeError(payload.get("error", f"LAT 子进程退出码 {proc.exitcode}"))
+    if status == "error":
+        raise RuntimeError(payload.get("error", "LAT 子进程失败"))
+    return payload
+
+
+def _run_lat_extended_three_ml_worker(
+    queue: mp.Queue,
+    bn_dir: str,
+    bn_name: str,
+    grb_name: str,
+    selection: Dict[str, Any],
+    result_parent: str,
+    extended_data_dir: str,
+    fixed_num_time_bins: Optional[int],
+    analysis_bin_start: Optional[float],
+    analysis_bin_end: Optional[float],
+    return_lat_plugin: bool,
+) -> None:
+    try:
+        _ = fixed_num_time_bins
+        result = _run_lat_extended_three_ml_impl(
+            bn_dir=bn_dir,
+            bn_name=bn_name,
+            grb_name=grb_name,
+            selection=selection,
+            result_parent=result_parent,
+            extended_data_dir=extended_data_dir,
+            analysis_bin_start=analysis_bin_start,
+            analysis_bin_end=analysis_bin_end,
+            return_lat_plugin=return_lat_plugin,
+        )
+        queue.put(("ok", result))
+    except Exception as exc:  # noqa: BLE001
+        queue.put(("error", {"error": f"{exc}\n{traceback.format_exc()}"}))
+
+
+__all__ = [
+    "run_lat_extended_three_ml_pipeline",
+]

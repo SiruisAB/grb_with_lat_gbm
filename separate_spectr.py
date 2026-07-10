@@ -55,25 +55,49 @@ except ImportError:  # pragma: no cover - optional dependency in redraw-only env
 
 mpl.rcParams.update(
     {
-        "lines.linewidth": 1.8,
-        "axes.linewidth": 1.8,
-        "axes.labelsize": 16,
-        "axes.titlesize": 16,
-        "font.size": 16,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-        "xtick.major.width": 1.6,
-        "ytick.major.width": 1.6,
+        "lines.linewidth": 2.0,
+        "axes.linewidth": 1.6,
+        "axes.labelsize": 18,
+        "axes.titlesize": 18,
+        "font.size": 17,
+        "xtick.labelsize": 15,
+        "ytick.labelsize": 15,
+        "xtick.major.width": 1.4,
+        "ytick.major.width": 1.4,
         "xtick.major.size": 6,
         "ytick.major.size": 6,
-        "legend.fontsize": 12,
+        "legend.fontsize": 13,
         "legend.frameon": False,
-        "savefig.dpi": 300,
+        "savefig.dpi": 320,
         "figure.dpi": 120,
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
 )
+
+PAPER_DETECTOR_STYLES = {
+    "nai_n3": {"marker": "P", "color": "#4e79a7"},
+    "nai_n7": {"marker": "X", "color": "#f28e2b"},
+    "bgo_b0": {"marker": "s", "color": "#59a14f"},
+    "lat": {"marker": "v", "color": "#b07aa1"},
+}
+
+PAPER_MODEL_STYLES = {
+    "total": {"color": "#1f3b73", "linewidth": 2.2},
+    "band": {"color": "#c44e52", "linewidth": 1.9, "linestyle": ":"},
+    "bb": {"color": "#55a868", "linewidth": 1.9, "linestyle": "--"},
+}
+
+PAPER_LEGEND_STYLE = {
+    "frameon": True,
+    "framealpha": 0.92,
+    "edgecolor": "#d0d0d0",
+    "facecolor": "white",
+    "handlelength": 1.3,
+    "handletextpad": 0.5,
+    "borderpad": 0.5,
+    "labelspacing": 0.45,
+}
 
 
 def _style_publication_axes(ax):
@@ -84,8 +108,8 @@ def _style_publication_axes(ax):
         top=False,
         right=False,
         length=6,
-        width=1.6,
-        labelsize=14,
+        width=1.4,
+        labelsize=15,
     )
     ax.tick_params(
         axis="both",
@@ -94,12 +118,12 @@ def _style_publication_axes(ax):
         top=False,
         right=False,
         length=3,
-        width=1.2,
+        width=1.1,
     )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(1.8)
-    ax.spines["bottom"].set_linewidth(1.8)
+    ax.spines["left"].set_linewidth(1.6)
+    ax.spines["bottom"].set_linewidth(1.6)
 
 
 _FLUXDATA_RE = re.compile(
@@ -185,14 +209,17 @@ def _plot_fluxdata_detector(ax, path: Path, label: str, marker: str, color: str)
         y,
         xerr=np.abs(xerr),
         yerr=np.abs(yerr),
-        marker=marker,
+        fmt=marker,
         label=label,
-        fmt="none",
-        ms=5,
+        ms=8.5,
         color=color,
-        elinewidth=1.2,
-        capthick=1.2,
-        capsize=2,
+        markerfacecolor=color,
+        markeredgecolor="white",
+        markeredgewidth=0.9,
+        elinewidth=1.35,
+        capthick=1.35,
+        capsize=3,
+        alpha=0.95,
     )
 
 
@@ -228,6 +255,47 @@ def compute_bandbb_curves(
     return {"total": total, "band": band, "bb": bb}
 
 
+def _collect_errorbar_y_values(ax) -> np.ndarray:
+    y_values: list[float] = []
+    for line in ax.get_lines():
+        marker = line.get_marker()
+        linestyle = line.get_linestyle()
+        if marker not in (None, "None", "") or linestyle in ("None", ""):
+            y_values.extend(np.asarray(line.get_ydata(), dtype=float).ravel().tolist())
+
+    for container in getattr(ax, "containers", []):
+        lines = getattr(container, "lines", None)
+        if not lines:
+            continue
+        data_line = lines[0] if len(lines) > 0 else None
+        if data_line is not None:
+            y_values.extend(np.asarray(data_line.get_ydata(), dtype=float).ravel().tolist())
+        barlinecols = lines[2] if len(lines) > 2 else []
+        for barcol in barlinecols or []:
+            if not hasattr(barcol, "get_segments"):
+                continue
+            for seg in barcol.get_segments():
+                if len(seg):
+                    y_values.extend(np.asarray(seg[:, 1], dtype=float).ravel().tolist())
+
+    y = np.asarray(y_values, dtype=float)
+    return y[np.isfinite(y) & (y > 0)]
+
+
+def _auto_tighten_log_ylim(ax, lower_pad: float = 0.65, upper_pad: float = 1.35) -> None:
+    y = _collect_errorbar_y_values(ax)
+    if y.size == 0:
+        return
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+    if not np.isfinite(y_min) or not np.isfinite(y_max) or y_min <= 0 or y_max <= 0:
+        return
+    if y_min == y_max:
+        y_min *= 0.8
+        y_max *= 1.25
+    ax.set_ylim(y_min * lower_pad, y_max * upper_pad)
+
+
 def _overlay_fit_curves(
     ax,
     timebin: str,
@@ -236,29 +304,33 @@ def _overlay_fit_curves(
 ) -> None:
     if fit_json_path is None:
         return
-    params = load_bandbb_fit_params(fit_json_path, bnname=bnname, timebin=timebin)
+    try:
+        params = load_bandbb_fit_params(fit_json_path, bnname=bnname, timebin=timebin)
+    except KeyError:
+        return
     xs = np.logspace(np.log10(8.0), np.log10(1e5), 400)
     curves = compute_bandbb_curves(xs, **params)
-    ax.plot(xs, curves["total"], color="#1f77b4", linewidth=2.2, label="Band+BB total fit")
-    ax.plot(xs, curves["band"], color="#d62728", linestyle=":", linewidth=1.8, label="Band fit")
-    ax.plot(xs, curves["bb"], color="#2ca02c", linestyle="--", linewidth=1.8, label="BB fit")
+    ax.plot(xs, curves["total"], **PAPER_MODEL_STYLES["total"], label="Best-fit total")
+    ax.plot(xs, curves["band"], **PAPER_MODEL_STYLES["band"], label="Band component")
+    ax.plot(xs, curves["bb"], **PAPER_MODEL_STYLES["bb"], label="BB component")
     param_text = (
         f"K1={params['K_1']:.3g}\n"
         f"alpha={params['alpha_1']:.3g}\n"
-        f"xp={params['xp_1']:.3g}\n"
+        f"xp={params['xp_1']:.3g} keV\n"
         f"beta={params['beta_1']:.3g}\n"
         f"K2={params['K_2']:.3g}\n"
-        f"kT={params['kT_2']:.3g}"
+        f"kT={params['kT_2']:.3g} keV"
     )
     ax.text(
-        0.98,
-        0.98,
+        0.975,
+        0.975,
         param_text,
         transform=ax.transAxes,
         ha="right",
         va="top",
-        fontsize=9,
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75, edgecolor="#999999"),
+        fontsize=11,
+        linespacing=1.35,
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.88, edgecolor="#808080"),
     )
 
 
@@ -277,17 +349,17 @@ def redraw_fluxdata_timebin(
     fig, ax = plt.subplots(figsize=(12, 8))
 
     detector_specs = [
-        ("nai_n3", "NaI (n3)", "+", "#4d4d4d"),
-        ("nai_n7", "NaI (n7)", "o", "#4d4d4d"),
-        ("bgo_b0", "BGO (b0)", "s", "#4d4d4d"),
-        ("lat", "LAT", "v", "#4d4d4d"),
+        ("nai_n3", "NaI (n3)", PAPER_DETECTOR_STYLES["nai_n3"]),
+        ("nai_n7", "NaI (n7)", PAPER_DETECTOR_STYLES["nai_n7"]),
+        ("bgo_b0", "BGO (b0)", PAPER_DETECTOR_STYLES["bgo_b0"]),
+        ("lat", "LAT", PAPER_DETECTOR_STYLES["lat"]),
     ]
     plotted_any = False
-    for detector_tag, label, marker, color in detector_specs:
+    for detector_tag, label, style in detector_specs:
         path = detector_files.get(detector_tag)
         if path is None:
             continue
-        _plot_fluxdata_detector(ax, path, label=label, marker=marker, color=color)
+        _plot_fluxdata_detector(ax, path, label=label, marker=style["marker"], color=style["color"])
         plotted_any = True
 
     if not plotted_any:
@@ -295,13 +367,21 @@ def redraw_fluxdata_timebin(
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("$E$ [keV]")
-    ax.set_ylabel("$E^{2} dN/dE$ [erg s$^{-1}$cm$^{-2}$]")
+    ax.set_xlabel("Energy [keV]", fontsize=18)
+    ax.set_ylabel(r"$E^{2} dN/dE$ [erg s$^{-1}$ cm$^{-2}$]", fontsize=18)
     _overlay_fit_curves(ax, timebin=timebin, bnname=bnname, fit_json_path=fit_json_path)
-    ax.set_title(_format_timebin_title(bnname, timebin))
+    ax.set_title(_format_timebin_title(bnname, timebin), fontsize=18, pad=10)
     ax.minorticks_on()
     _style_publication_axes(ax)
-    ax.legend(loc=2)
+    ax.tick_params(axis="both", which="major", labelsize=16)
+    ax.tick_params(axis="both", which="minor", labelsize=14)
+    ax.xaxis.label.set_size(19)
+    ax.yaxis.label.set_size(19)
+    ax.set_xlim(8.0, 1.2e5)
+    ax.set_ylim(bottom=max(1e-20, ax.get_ylim()[0]))
+    ax.grid(which="major", alpha=0.14, linestyle="-")
+    ax.grid(which="minor", alpha=0.06, linestyle=":")
+    ax.legend(loc="upper left", fontsize=13, **PAPER_LEGEND_STYLE)
     plt.tight_layout()
 
     output_dir = Path(output_dir)
@@ -327,38 +407,47 @@ def redraw_fluxdata_overview(
     ncols = 2 if n_plots > 1 else 1
     nrows = int(np.ceil(n_plots / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 6 * nrows), squeeze=False)
+    fig.set_facecolor("white")
 
     for idx, timebin in enumerate(timebins):
         row, col = divmod(idx, ncols)
         ax = axes[row][col]
         detector_files = groups[timebin]
-        for detector_tag, label, marker, color in [
-            ("nai_n3", "NaI (n3)", "+", "#4d4d4d"),
-            ("nai_n7", "NaI (n7)", "o", "#4d4d4d"),
-            ("bgo_b0", "BGO (b0)", "s", "#4d4d4d"),
-            ("lat", "LAT", "v", "#4d4d4d"),
+        for detector_tag, label, style in [
+            ("nai_n3", "NaI (n3)", PAPER_DETECTOR_STYLES["nai_n3"]),
+            ("nai_n7", "NaI (n7)", PAPER_DETECTOR_STYLES["nai_n7"]),
+            ("bgo_b0", "BGO (b0)", PAPER_DETECTOR_STYLES["bgo_b0"]),
+            ("lat", "LAT", PAPER_DETECTOR_STYLES["lat"]),
         ]:
             path = detector_files.get(detector_tag)
             if path is None:
                 continue
-            _plot_fluxdata_detector(ax, path, label=label, marker=marker, color=color)
+            _plot_fluxdata_detector(ax, path, label=label, marker=style["marker"], color=style["color"])
         _overlay_fit_curves(ax, timebin=timebin, bnname=bnname, fit_json_path=fit_json_path)
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_title(timebin)
+        ax.set_title(timebin, fontsize=17, pad=8)
         ax.minorticks_on()
         _style_publication_axes(ax)
+        ax.tick_params(axis="both", which="major", labelsize=15)
+        ax.tick_params(axis="both", which="minor", labelsize=13)
+        ax.xaxis.label.set_size(18)
+        ax.yaxis.label.set_size(18)
+        ax.set_xlim(8.0, 1.2e5)
+        _auto_tighten_log_ylim(ax)
+        ax.grid(which="major", alpha=0.12, linestyle="-")
+        ax.grid(which="minor", alpha=0.05, linestyle=":")
         if row == nrows - 1:
-            ax.set_xlabel("$E$ [keV]")
+            ax.set_xlabel("Energy [keV]", fontsize=17)
         if col == 0:
-            ax.set_ylabel("$E^{2} dN/dE$ [erg s$^{-1}$cm$^{-2}$]")
-        ax.legend(loc=2, fontsize=10)
+            ax.set_ylabel(r"$E^{2} dN/dE$ [erg s$^{-1}$ cm$^{-2}$]", fontsize=17)
+        ax.legend(loc="upper left", fontsize=12, **PAPER_LEGEND_STYLE)
 
     for idx in range(n_plots, nrows * ncols):
         row, col = divmod(idx, ncols)
         axes[row][col].axis("off")
 
-    fig.suptitle(f"{bnname} fluxdata overview", y=0.995)
+    fig.suptitle(f"{bnname} fluxdata overview", y=0.995, fontsize=18, fontweight="semibold")
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -662,6 +751,8 @@ def discrete_spectr(
         model2.K ,model2.kT = parameter_values[4:6]
         model3 = Powerlaw(piv=1E2)
         model3.K,model3.index = parameter_values[6:8]
+        model3.K.min_value, model3.K.max_value = 1e-7, 1e6
+        model3.index.min_value, model3.index.max_value = -5.0, 5.0
         modelTotal=model1+model2+model3
         model_str1='Band'
         model_str2='BB'
@@ -746,11 +837,27 @@ def discrete_spectr(
     #rebinnedWavelength[-1]=0
 
 
-    plt.errorbar(rebinnedWavelength,k0*rebinnedWavelength*rebinnedWavelength*rebinnedFlux,\
-                xerr=np.abs([rebinnedWavelengthErrNeg,rebinnedWavelengthErrPos]), \
-                yerr=np.abs([k0*rebinnedWavelength*rebinnedWavelength*rebinnedFluxErrNeg,k0*rebinnedWavelength*rebinnedWavelength*rebinnedFluxErrPos]),marker='+',
-                        label='NaI ('+gbm_detectors[nai_index]+')',
-                        fmt='.',ms=5,color='#4d4d4d',elinewidth=1.2,capthick=1.2,capsize=2)
+    plt.errorbar(
+        rebinnedWavelength,
+        k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFlux,
+        xerr=np.abs([rebinnedWavelengthErrNeg, rebinnedWavelengthErrPos]),
+        yerr=np.abs(
+            [
+                k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFluxErrNeg,
+                k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFluxErrPos,
+            ]
+        ),
+        fmt='P',
+        label='NaI ('+gbm_detectors[nai_index]+')',
+        ms=8.5,
+        color='#4e79a7',
+        markerfacecolor='#4e79a7',
+        markeredgecolor='white',
+        markeredgewidth=0.9,
+        elinewidth=1.45,
+        capthick=1.45,
+        capsize=3,
+    )
 
     text_file = os.path.join(
         output_dir,
@@ -790,11 +897,27 @@ def discrete_spectr(
 
     #rebinnedWavelength[-1]=0
 
-    plt.errorbar(rebinnedWavelength,k0*rebinnedWavelength*rebinnedWavelength*rebinnedFlux,\
-                xerr=np.abs([rebinnedWavelengthErrNeg,rebinnedWavelengthErrPos]), \
-                yerr=np.abs([k0*rebinnedWavelength*rebinnedWavelength*rebinnedFluxErrNeg,k0*rebinnedWavelength*rebinnedWavelength*rebinnedFluxErrPos]),marker='o',
-                        label='NaI ('+gbm_detectors[nai_index]+')',
-                        fmt='.',ms=5,color='#4d4d4d',elinewidth=1.2,capthick=1.2,capsize=2)
+    plt.errorbar(
+        rebinnedWavelength,
+        k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFlux,
+        xerr=np.abs([rebinnedWavelengthErrNeg, rebinnedWavelengthErrPos]),
+        yerr=np.abs(
+            [
+                k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFluxErrNeg,
+                k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFluxErrPos,
+            ]
+        ),
+        fmt='o',
+        label='NaI ('+gbm_detectors[nai_index]+')',
+        ms=8.5,
+        color='#f28e2b',
+        markerfacecolor='#f28e2b',
+        markeredgecolor='white',
+        markeredgewidth=0.9,
+        elinewidth=1.45,
+        capthick=1.45,
+        capsize=3,
+    )
 
     text_file = os.path.join(
         output_dir,
@@ -874,11 +997,27 @@ def discrete_spectr(
 
     # rebinnedWavelength[-1]=0
 
-    plt.errorbar(rebinnedWavelength,k0*rebinnedWavelength*rebinnedWavelength*rebinnedFlux,\
-                xerr=np.abs([rebinnedWavelengthErrNeg,rebinnedWavelengthErrPos]), \
-                yerr=np.abs([k0*rebinnedWavelength*rebinnedWavelength*rebinnedFluxErrNeg,k0*rebinnedWavelength*rebinnedWavelength*rebinnedFluxErrPos]),marker='s',
-                        label='BGO ('+gbm_detectors[bgo_index]+')',
-                        fmt='.',ms=5,color='#4d4d4d',elinewidth=1.2,capthick=1.2,capsize=2)
+    plt.errorbar(
+        rebinnedWavelength,
+        k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFlux,
+        xerr=np.abs([rebinnedWavelengthErrNeg, rebinnedWavelengthErrPos]),
+        yerr=np.abs(
+            [
+                k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFluxErrNeg,
+                k0 * rebinnedWavelength * rebinnedWavelength * rebinnedFluxErrPos,
+            ]
+        ),
+        fmt='s',
+        label='BGO ('+gbm_detectors[bgo_index]+')',
+        ms=9.0,
+        color='#59a14f',
+        markerfacecolor='#59a14f',
+        markeredgecolor='white',
+        markeredgewidth=0.9,
+        elinewidth=1.45,
+        capthick=1.45,
+        capsize=3,
+    )
 
     text_file = os.path.join(
         output_dir,
@@ -988,14 +1127,16 @@ def discrete_spectr(
                     * rebinnedFluxErrPos,
                 ]
             ),
-            marker="v",
+            fmt="D",
             label="LAT",
-            fmt=".",
-            ms=5,
-            color="#4d4d4d",
-            elinewidth=1.2,
-            capthick=1.2,
-            capsize=2,
+            ms=9.5,
+            color="#e15759",
+            markerfacecolor="#e15759",
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            elinewidth=1.45,
+            capthick=1.45,
+            capsize=3,
         )
 
         text_file = os.path.join(
@@ -1147,6 +1288,12 @@ def discrete_spectr(
 
     plt.xlim([5e0, emax*2.0])
 
+    if model_str == 'SBPL':
+        # 在转折能量附近多采样一些点以更好地显示转折特征
+        xs_around_E0 = np.logspace(np.log10(parameter_values[3]*0.1), 
+                                    np.log10(parameter_values[3]*10), 100)
+        xs = np.sort(np.append(xs, xs_around_E0))
+
     plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.02, k0*max(xs*xs*modelTotal(xs))*50.0])
     if model_str == 'pl':
         plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.02, k0*max(xs*xs*modelTotal(xs))*50.0])
@@ -1201,12 +1348,14 @@ def discrete_spectr(
         plt.ylim([y_min*0.5, y_max*5.0])
 
     ax = plt.gca()
-    ax.set_xlabel('$E$ [keV]')
-    ax.set_ylabel('$E^{2} dN/dE$ [erg s$^{-1}$cm$^{-2}$]')
+    ax.set_xlabel('$E$ [keV]', fontsize=19)
+    ax.set_ylabel('$E^{2} dN/dE$ [erg s$^{-1}$cm$^{-2}$]', fontsize=19)
     # ax.set_title(f"{bnname}_spectra{time_bin_suffix}")
     ax.minorticks_on()
     _style_publication_axes(ax)
-    ax.legend(loc=2)
+    ax.tick_params(axis="both", which="major", labelsize=17)
+    ax.tick_params(axis="both", which="minor", labelsize=15)
+    ax.legend(loc=2, fontsize=13, **PAPER_LEGEND_STYLE)
     suffix = "gbm_lat" if "lat" in analysis_mode.lower() and lat is not None else "gbm"
     out_name = f"bs_{bnname}_{suffix}_spectra_{model_str}{time_bin_suffix}.pdf"
     plt.tight_layout()

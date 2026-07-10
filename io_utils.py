@@ -108,13 +108,13 @@ def _gll_basename_for_extended_lat_copy(fname: str, bn_name: str) -> str | None:
     return None
 
 
-def copy_extended_lat_to_bn_workspace(
+def copy_extended_lat_to_bn_dir(
     grb_name: str,
     dest_bn_dir: str,
     extended_root: str | None = None,
 ) -> bool:
     """
-    将 ``Extended_data_ex/{grb_name}/`` 下的 LAT 文件复制到结果目录下的 ``…/{bn_name}/`` 工作区。
+    将 ``Extended_data_ex/{grb_name}/`` 下的 LAT 文件复制到当前 GRB 的 ``{bn_name}`` 结果目录。
 
     :param grb_name: GCN 名称（与 Extended_data_ex 子目录名一致，如 GRB231129C）
     :param dest_bn_dir: 目标目录，一般为 ``{result_root}/{grb_name}/{bn_name}``

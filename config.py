@@ -1,56 +1,48 @@
 # -*- coding: utf-8 -*-
-"""GBM/LAT 联合分析：路径与单次运行参数（可与核心脚本解耦导入）。"""
+"""GBM/LAT 联合分析配置与运行覆盖参数。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 
 @dataclass
 class GRBProjectConfig:
-    """
-    工程级默认路径与分析选项；可在实例化后逐项赋值，再调用 GRBProject.run()。
-
-    bnname / grbname / t0 / t1 等设为 None 时表示沿用核心脚本原有逻辑（目录表与 GCN）。
-    plot_joint_lightcurve 为 False 时跳过联合光变图（lightcurves）；None 与 True 为默认绘制。
-    """
-
-    # --- 数据与目录路径（默认值与原 gbmtest_enhanced1_refactored.py 一致）---
     data_dir: str = "/home/mxr/lee/gbmtest/GBM_data"
     catalog_xls: str = "/home/mxr/lee/data/GBMcatolog.xls"
     merged_xls: str = "/home/mxr/lee/newflietest/merged_grb_fit_results.xlsx"
     fermilat_grb_xls: str = "/home/mxr/lee/fermilat-grb.xls"
-    result_root: str = "/home/mxr/lee/gbmtest/results3"
+    result_root: str = "/home/mxr/lee/gbmtest/results"
     summary_csv_name: str = "summary_results.csv"
-    result_root_gcn_batch: str = "/home/mxr/lee/gbmtest/results3"
-
-    # --- 运行模式 ---
     analysis_mode: str = "gbm+lat"
     fixed_num_time_bins: Optional[int] = None
-
-    # --- 可选：先占位，run 前再赋值 ---
     bnname: Optional[str] = None
-    """触发名，如 bn221009888；若设置且未传 target_grbs，则只分析该暴。"""
     grbname: Optional[str] = None
-    """GRB 标准名或输出用名称；None 时从 fermilat GCN 表解析。"""
     t0: Optional[float] = None
     t1: Optional[float] = None
     ra: Optional[float] = None
     dec: Optional[float] = None
     lat_three_ml_full: Optional[bool] = None
     plot_joint_lightcurve: Optional[bool] = None
+    gbm_start: Optional[float] = None
+    gbm_stop: Optional[float] = None
+    gbm_display_pad_before_s: Optional[float] = None
+    gbm_display_pad_after_s: Optional[float] = None
+    lightcurve_include_lat: Optional[bool] = None
+    lightcurve_lat_prob_threshold: Optional[float] = None
+    lightcurve_nai_bands_kev: Optional[Sequence[tuple[float, float]]] = None
+    lightcurve_bgo_band_kev: Optional[tuple[float, float]] = None
+    lightcurve_active_interval: Optional[str] = None
+    lightcurve_background_intervals: Optional[Sequence[str]] = None
+    models: Optional[Sequence[str]] = None
+    special_yaml: Optional[str] = None
+    special_burst_name: Optional[str] = None
+    model_preset: Optional[str] = None
 
 
 @dataclass
 class GRBRunOverrides:
-    """传入核心 analyze_grb 的覆盖项；仅非 None 字段生效。
-
-    lat_three_ml_full: 为 True/False 时覆盖 session.lat_extended_three_ml_pipeline，
-    控制是否运行完整 LAT Extended / GtBurst / threeML 流水线。
-    plot_joint_lightcurve: 为 False 时跳过联合光变图（``lightcurves``）；None 表示沿用默认（绘制）。
-    """
-
     grbname: Optional[str] = None
     t0: Optional[float] = None
     t1: Optional[float] = None
@@ -58,6 +50,19 @@ class GRBRunOverrides:
     dec: Optional[float] = None
     lat_three_ml_full: Optional[bool] = None
     plot_joint_lightcurve: Optional[bool] = None
+    gbm_start: Optional[float] = None
+    gbm_stop: Optional[float] = None
+    gbm_display_pad_before_s: Optional[float] = None
+    gbm_display_pad_after_s: Optional[float] = None
+    lightcurve_include_lat: Optional[bool] = None
+    lightcurve_lat_prob_threshold: Optional[float] = None
+    lightcurve_nai_bands_kev: Optional[Sequence[tuple[float, float]]] = None
+    lightcurve_bgo_band_kev: Optional[tuple[float, float]] = None
+    lightcurve_active_interval: Optional[str] = None
+    lightcurve_background_intervals: Optional[Sequence[str]] = None
+    models: Optional[Sequence[str]] = None
+    special_yaml: Optional[str] = None
+    special_burst_name: Optional[str] = None
 
     def is_empty(self) -> bool:
         return all(
@@ -70,12 +75,24 @@ class GRBRunOverrides:
                 "dec",
                 "lat_three_ml_full",
                 "plot_joint_lightcurve",
+                "gbm_start",
+                "gbm_stop",
+                "gbm_display_pad_before_s",
+                "gbm_display_pad_after_s",
+                "lightcurve_include_lat",
+                "lightcurve_lat_prob_threshold",
+                "lightcurve_nai_bands_kev",
+                "lightcurve_bgo_band_kev",
+                "lightcurve_active_interval",
+                "lightcurve_background_intervals",
+                "models",
+                "special_yaml",
+                "special_burst_name",
             )
         )
 
 
 def run_overrides_from_config(cfg: GRBProjectConfig) -> Optional[GRBRunOverrides]:
-    """由工程配置构造覆盖对象；若无可覆盖字段则返回 None。"""
     ov = GRBRunOverrides(
         grbname=cfg.grbname,
         t0=cfg.t0,
@@ -84,5 +101,18 @@ def run_overrides_from_config(cfg: GRBProjectConfig) -> Optional[GRBRunOverrides
         dec=cfg.dec,
         lat_three_ml_full=cfg.lat_three_ml_full,
         plot_joint_lightcurve=cfg.plot_joint_lightcurve,
+        gbm_start=cfg.gbm_start,
+        gbm_stop=cfg.gbm_stop,
+        gbm_display_pad_before_s=cfg.gbm_display_pad_before_s,
+        gbm_display_pad_after_s=cfg.gbm_display_pad_after_s,
+        lightcurve_include_lat=cfg.lightcurve_include_lat,
+        lightcurve_lat_prob_threshold=cfg.lightcurve_lat_prob_threshold,
+        lightcurve_nai_bands_kev=cfg.lightcurve_nai_bands_kev,
+        lightcurve_bgo_band_kev=cfg.lightcurve_bgo_band_kev,
+        lightcurve_active_interval=cfg.lightcurve_active_interval,
+        lightcurve_background_intervals=cfg.lightcurve_background_intervals,
+        models=cfg.models,
+        special_yaml=cfg.special_yaml,
+        special_burst_name=cfg.special_burst_name,
     )
     return None if ov.is_empty() else ov

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from .session import session
 
 
@@ -12,3 +14,4 @@ def log(msg: str) -> None:
     if session.log_file_handle is not None:
         session.log_file_handle.write(line + "\n")
         session.log_file_handle.flush()
+    session.extra.setdefault("runtime_log", []).append(f"{datetime.now():%H:%M:%S} {msg}")

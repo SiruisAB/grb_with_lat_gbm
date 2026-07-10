@@ -11,18 +11,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy import units as u
 from astropy.io import fits as pyfits
-from astromodels import Blackbody
-from threeML import (
-    BayesianAnalysis,
-    DataList,
-    Model,
-    OGIPLike,
-    PointSource,
-    display_spectrum_model_counts,
-    plot_spectra,
-)
-from modelbuild import build_model
-from separate_spectr import discrete_spectr
 
 from .logging_utils import log
 
@@ -35,83 +23,63 @@ def _run_bayesian_analysis_for_model(
     bnname: str,
     ra: float,
     dec: float,
-    datalist: DataList,
-    plugins: List[OGIPLike],
-    lat_plugin: Optional[OGIPLike],
+    datalist,
+    plugins,
+    lat_plugin,
     dets: List[str],
-    result_dir: str,
+    result_dir: str, #result_dir / model_str这里使用的是这样的
     bin_start: float,
     bin_end: float,
     duration: float,
     analysis_mode: str,
 ) -> Dict:
+    from astromodels import Blackbody
+    from grb_project.modelbuild import build_model
+    from .separate_spectr import discrete_spectr
+    from threeML import BayesianAnalysis, Model, PointSource, display_spectrum_model_counts, plot_spectra
+
+    fluxdata_dir = os.path.join(result_dir, "fluxdata")
+    os.makedirs(fluxdata_dir, exist_ok=True)
+
     spectral_model = build_model(model_str)
     grb = PointSource("GRB", ra=ra, dec=dec, spectral_shape=spectral_model)
     model = Model(grb)
     model.display(complete=True)
 
     bs = BayesianAnalysis(model, datalist)
-
     bs.set_sampler("dynesty_nested")
-    bs.sampler.setup(
-        n_live_points=700,
-        bound="multi",
-        sample="auto",
-        dlogz=0.1,
-    )
-
+    bs.sampler.setup(n_live_points=700, bound="multi", sample="auto", dlogz=0.1)
     bs.sample(quiet=True)
     bs.restore_median_fit()
 
-    result = bs.sampler.results
-    samples = result.samples  # noqa: F841
     log_marginal_likelihood = bs.sampler.log_marginal_likelihood
-
     suffix = "gbm_lat" if "lat" in analysis_mode.lower() else "gbm"
 
     corner_fig = bs.results.corner_plot()
-    corner_fig_path = os.path.join(
-        result_dir,
-        f"bs_{bnname}_{model_str}_{bin_start}-{bin_end}_{suffix}_corner_plot.png",
-    )
+    corner_fig_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_{bin_start}-{bin_end}_{suffix}_corner_plot.png")
     plt.savefig(corner_fig_path)
     plt.close(corner_fig)
 
     bs.results.display()
 
-    result_fits_path = os.path.join(
-        result_dir,
-        f"my_results_{bin_start}-{bin_end}.fits",
-    )
+    result_fits_path = os.path.join(result_dir, f"my_results_{bin_start}-{bin_end}.fits")
     bs.results.write_to(result_fits_path, overwrite=True)
+    with pyfits.open(result_fits_path) as results_data:
+        parameter_values = results_data[1].data.field(1)
+        parameter_value_errors = results_data[1].data.field(4)
+        parameters = results_data[1].data.field(0)
 
-    results_data = pyfits.open(result_fits_path)
-    parameter_values = results_data[1].data.field(1)
-    parameter_value_errors = results_data[1].data.field(4)
-    parameters = results_data[1].data.field(0)
-
-    logg.info("开始绘制频谱图")
     try:
+        min_rate = [0.01, 1, 1, 1] if "lat" in analysis_mode.lower() else [1, 1, 1]
         if bnname == "bn231222310":
-            spec_fig = display_spectrum_model_counts(bs, min_rate=2)
-        else:
-            if "lat" in analysis_mode.lower():
-                min_rate = [0.01, 1.0, 1.0, 1.0]
-            else:
-                min_rate = [5.0, 5.0, 5.0]
-
-            spec_fig = display_spectrum_model_counts(bs, min_rate=min_rate)
-        spec_fig_path = os.path.join(
-            result_dir,
-            f"bs_{bnname}_{model_str}_counts_{suffix}_spectrum_{bin_start}-{bin_end}.png",
-        )
+            min_rate = [0.01, 0.01, 0.01, 0.01] if "lat" in analysis_mode.lower() else 2
+        spec_fig = display_spectrum_model_counts(bs, min_rate=min_rate)
+        spec_fig_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_counts_{suffix}_spectrum_{bin_start}-{bin_end}.png")
         spec_fig.savefig(spec_fig_path)
         plt.close(spec_fig)
     except Exception as exc:  # noqa: BLE001
         logg.error("警告: 绘制频谱图失败: %s", exc)
 
-    logg.info("开始绘制SED")
-    components_to_use = ["", "total"]
     try:
         sed_ene_max = 100 * u.GeV if "lat" in analysis_mode.lower() else 100 * u.MeV
         fig_sed = plot_spectra(
@@ -123,16 +91,12 @@ def _run_bayesian_analysis_for_model(
         )
         ax = fig_sed.get_axes()[0]
         ax.set_ylim(1e-10, 1e-5)
-        sed_path = os.path.join(
-            result_dir,
-            f"bs_{bnname}_{model_str}_{suffix}_spectrum_{bin_start}-{bin_end}_{components_to_use[0]}.png",
-        )
+        sed_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_{suffix}_spectrum_{bin_start}-{bin_end}_total.png")
         fig_sed.savefig(sed_path)
         plt.close(fig_sed)
     except Exception as exc:  # noqa: BLE001
         log(f"警告: 绘制SED图失败: {exc}")
 
-    logg.info("开始绘制分离谱")
     try:
         discrete_spectr(
             fluence_plugins=plugins,
@@ -146,54 +110,34 @@ def _run_bayesian_analysis_for_model(
             bin_start=bin_start,
             bin_end=bin_end,
             analysis_mode=analysis_mode,
+            output_dir=fluxdata_dir,
         )
     except Exception as exc:  # noqa: BLE001
         logg.error("警告: 绘制分离谱失败: %s", exc)
 
-    logg.info("结束绘制")
-
-    logg.info("开始计算统计量")
     stat_frame = bs.results.get_statistic_measure_frame()
     aic = stat_frame["statistical measures"]["AIC"]
     bic = stat_frame["statistical measures"]["BIC"]
 
     emin = 8 * u.keV
-    if "lat" in analysis_mode.lower():
-        emax = 1e8 * u.keV
-    else:
-        emax = 40000 * u.keV
+    emax = 1e8 * u.keV if "lat" in analysis_mode.lower() else 40000 * u.keV
     flux_total = bs.results.get_flux(ene_min=emin, ene_max=emax)
     fluence = flux_total["flux"][0] * (bin_end - bin_start)
 
-    logg.info("开始保存参数信息与误差")
     param_dict: Dict[str, float] = {}
     for i, param_name in enumerate(parameters):
-        clean_param_name = (
-            param_name.replace(":", "_")
-            .replace("+", "_")
-            .replace(" ", "_")
-        )
+        clean_param_name = param_name.replace(":", "_").replace("+", "_").replace(" ", "_")
         param_dict[f"{clean_param_name}_value"] = parameter_values[i]
         param_dict[f"{clean_param_name}_error"] = parameter_value_errors[i]
-    logg.info("结束保存参数信息与误差")
 
-    def _compute_bb_energy_flux_erg_cm2_s(
-        k: float,
-        kT: float,
-        emin_keV: float,
-        emax_keV: float,
-        n: int = 4096,
-    ) -> float:
+    def _compute_bb_energy_flux_erg_cm2_s(k: float, kT: float, emin_keV: float, emax_keV: float, n: int = 4096) -> float:
         try:
             bb = Blackbody()
             bb.K = float(k)
             bb.kT = float(kT)
-
             es = np.logspace(np.log10(emin_keV), np.log10(emax_keV), n)
             dnde = bb(es)
-            integrand = es * dnde
-            keV_flux = np.trapz(integrand, es)
-            return float(keV_flux) * 1.602176634e-9
+            return float(np.trapz(es * dnde, es)) * 1.602176634e-9
         except Exception:
             return float("nan")
 
@@ -203,30 +147,18 @@ def _run_bayesian_analysis_for_model(
                 return float(param_dict[k])
         return None
 
-    logg.info("开始计算 FBB")
     f_bb = float("nan")
     if model_str == "blackbody":
         bb_k = _get_first_value(["GRB.spectrum.main.Blackbody.K_value"])
         bb_kT = _get_first_value(["GRB.spectrum.main.Blackbody.kT_value"])
         if bb_k is not None and bb_kT is not None:
-            f_bb = _compute_bb_energy_flux_erg_cm2_s(
-                bb_k,
-                bb_kT,
-                float(emin.to_value(u.keV)),
-                float(emax.to_value(u.keV)),
-            )
+            f_bb = _compute_bb_energy_flux_erg_cm2_s(bb_k, bb_kT, float(emin.to_value(u.keV)), float(emax.to_value(u.keV)))
     elif model_str in {"band+bb", "comp+bb"}:
         bb_k = _get_first_value(["GRB.spectrum.main.composite.K_2_value"])
         bb_kT = _get_first_value(["GRB.spectrum.main.composite.kT_2_value"])
         if bb_k is not None and bb_kT is not None:
-            f_bb = _compute_bb_energy_flux_erg_cm2_s(
-                bb_k,
-                bb_kT,
-                float(emin.to_value(u.keV)),
-                float(emax.to_value(u.keV)),
-            )
-    logg.info("结束计算 FBB")
-    logg.info("开始构建 summary_entry")
+            f_bb = _compute_bb_energy_flux_erg_cm2_s(bb_k, bb_kT, float(emin.to_value(u.keV)), float(emax.to_value(u.keV)))
+
     summary_entry: Dict[str, object] = {
         "grb_name": grb_name,
         "bnname": bnname,
@@ -245,8 +177,5 @@ def _run_bayesian_analysis_for_model(
         "bin_end_time": bin_end,
         "bin_duration": bin_end - bin_start,
     }
-    logg.info("结束构建 summary_entry")
     summary_entry.update(param_dict)
-    logg.info("开始更新 summary_entry")
-
     return summary_entry
