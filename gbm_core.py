@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -53,32 +52,19 @@ def _determine_time_bins(
 ) -> Tuple[np.ndarray, int, float]:
     duration = t1 - t0
 
-    fixed_num_time_bins = 1 if fixed_num_time_bins is None else fixed_num_time_bins
+    if fixed_num_time_bins is None or fixed_num_time_bins <= 0:
+        num_time_bins = 1
+        time_bins = np.round(np.array([t0, t1]), 2)
+        log(f"总持续时间: {duration:.2f}s, 使用单个积分时间bin")
+        return time_bins, num_time_bins, duration
 
-    if fixed_num_time_bins is not None and fixed_num_time_bins > 0:
+    if fixed_num_time_bins > 0:
         num_time_bins = fixed_num_time_bins
         time_bins = np.round(np.linspace(t0, t1, num_time_bins + 1), 2)
         log(f"总持续时间: {duration:.2f}s, 使用固定分bin数量: {num_time_bins}")
         return time_bins, num_time_bins, duration
 
-    if duration <= 2:
-        num_time_bins = 1
-        time_bins = np.round(np.array([t0, t1]), 2)
-    elif duration <= 10:
-        bin_size = 1.0
-        num_time_bins = int(math.ceil(duration / bin_size))
-        time_bins = np.round(np.linspace(t0, t1, num_time_bins + 1), 2)
-    elif duration <= 100:
-        bin_size = 5.0
-        num_time_bins = int(math.ceil(duration / bin_size))
-        time_bins = np.round(np.linspace(t0, t1, num_time_bins + 1), 2)
-    else:
-        bin_size = 10.0
-        num_time_bins = int(math.ceil(duration / bin_size))
-        time_bins = np.round(np.linspace(t0, t1, num_time_bins + 1), 2)
-
-    log(f"总持续时间: {duration:.2f}s, 分为 {num_time_bins} 个时间bin")
-    return time_bins, num_time_bins, duration
+    raise AssertionError("fixed_num_time_bins validation is unreachable")
 
 
 def _build_time_bins_list(
@@ -325,29 +311,31 @@ def _build_gbm_plugin_for_detector(
         log(f"警告: 探测器 {det} 的本底区间为空，跳过")
         return None
 
-    ts_cspec = TimeSeriesBuilder.from_gbm_cspec_or_ctime(
-        det,
-        cspec_or_ctime_file=cspec,
-        rsp_file=rsp,
-    )
-    log(f"background_interval: {background_parts}")
     work_dir = Path(output_dir or grb_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     cwd = os.getcwd()
     os.chdir(work_dir)
     try:
-        ts_cspec.set_background_interval(*background_parts)
-        ts_cspec.save_background(f"{det}_bkg.h5", overwrite=True)
+        ts_tte = time_series.get(det)
+        if ts_tte is None:
+            ts_cspec = TimeSeriesBuilder.from_gbm_cspec_or_ctime(
+                det,
+                cspec_or_ctime_file=cspec,
+                rsp_file=rsp,
+            )
+            log(f"background_interval: {background_parts}")
+            ts_cspec.set_background_interval(*background_parts)
+            ts_cspec.save_background(f"{det}_bkg.h5", overwrite=True)
 
-        ts_tte = TimeSeriesBuilder.from_gbm_tte(
-            det,
-            tte_file=tte,
-            rsp_file=rsp,
-            restore_background=f"{det}_bkg.h5",
-            poly_order=-1,
-        )
-        ts_tte.set_background_interval(*background_parts)
-        time_series[det] = ts_tte
+            ts_tte = TimeSeriesBuilder.from_gbm_tte(
+                det,
+                tte_file=tte,
+                rsp_file=rsp,
+                restore_background=f"{det}_bkg.h5",
+                poly_order=-1,
+            )
+            ts_tte.set_background_interval(*background_parts)
+            time_series[det] = ts_tte
 
         try:
             print("时间间隔为：", source_interval, f"{bin_start:.2f}-{bin_end:.2f}")

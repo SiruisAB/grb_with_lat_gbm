@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grb-project"
+version = "0.1.0"
+description = "Fermi GBM/LAT GRB analysis workspace"
+requires-python = ">=3.9"
+dependencies = [
+  "astropy",
+  "matplotlib",
+  "numpy",
+  "openpyxl",
+  "pandas",
+  "PyYAML",
+  "streamlit",
+  "xlrd",
+]
+
+[project.optional-dependencies]
+science = ["astromodels", "threeML"]
+test = ["pytest"]
+
+[project.scripts]
+grb-project = "grb_project.pipeline:cli_main"
+
+[tool.setuptools]
+packages = ["grb_project"]
+package-dir = {grb_project = "."}
+
+[tool.setuptools.package-data]
+grb_project = ["special_bursts.yaml"]

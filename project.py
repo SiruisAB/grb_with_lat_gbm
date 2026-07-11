@@ -34,6 +34,34 @@ def _as_text(value: object, default: str = "") -> str:
     return text or default
 
 
+def _configured_value(
+    run_overrides: Optional[GRBRunOverrides],
+    project_config: Optional[GRBProjectConfig],
+    name: str,
+    default=None,
+):
+    for source in (run_overrides, project_config):
+        if source is not None:
+            value = getattr(source, name, None)
+            if value is not None:
+                return value
+    return default
+
+
+def _normalize_targets(target_grbs) -> Optional[list[str]]:
+    if target_grbs is None:
+        return None
+    if isinstance(target_grbs, (str, bytes)):
+        return [str(target_grbs)]
+    return [str(value) for value in target_grbs]
+
+
+def _effective_fit_mode(requested_mode: str, lat_plugin: object) -> str:
+    if _mode_includes(requested_mode, "lat") and lat_plugin is not None:
+        return "gbm+lat"
+    return "gbm"
+
+
 def _catalog_frame_by_bnname(catalog: pd.DataFrame) -> pd.DataFrame:
     if "bnname" not in catalog.columns:
         return catalog
@@ -121,6 +149,7 @@ def _build_result_metadata(
     special_yaml: Optional[str],
     special_burst_name: Optional[str],
     lat_three_ml_full: Optional[bool],
+    trigger_met: Optional[float] = None,
     plot_joint_lightcurve: Optional[bool] = None,
     gbm_start: Optional[float] = None,
     gbm_stop: Optional[float] = None,
@@ -153,6 +182,7 @@ def _build_result_metadata(
         "special_yaml": special_yaml,
         "special_burst_name": special_burst_name,
         "lat_three_ml_full": lat_three_ml_full,
+        "trigger_met": trigger_met,
         "plot_joint_lightcurve": plot_joint_lightcurve,
         "gbm_start": gbm_start,
         "gbm_stop": gbm_stop,
@@ -185,6 +215,53 @@ def _default_model_list(project_config: Optional[GRBProjectConfig], run_override
         if preset == "gbm_only":
             return ["band", "comp", "blackbody"]
     return ["band", "comp", "blackbody"]
+
+
+def _resolve_runtime_intervals(
+    *,
+    catalog_row: pd.Series,
+    special_cfg: dict,
+    project_config: Optional[GRBProjectConfig],
+    run_overrides: Optional[GRBRunOverrides],
+    bnname: str,
+) -> tuple[str, str]:
+    from .gbm_core import _build_background_interval_string, resolve_active_interval_from_special_and_catalog
+
+    active_interval = resolve_active_interval_from_special_and_catalog(
+        special_cfg.get("time_segments"),
+        catalog_row,
+        str(special_cfg.get("active_interval", "")),
+    )
+    background_interval = _as_text(
+        special_cfg.get("background_interval"),
+        _build_background_interval_string(catalog_row, bnname)
+        if {
+            "back_interval_low_start",
+            "back_interval_low_stop",
+            "back_interval_high_start",
+            "back_interval_high_stop",
+        }.issubset(catalog_row.index)
+        else "",
+    )
+
+    requested_active = _configured_value(
+        run_overrides, project_config, "lightcurve_active_interval"
+    )
+    if requested_active is not None and str(requested_active).strip():
+        active_interval = str(requested_active).strip()
+
+    requested_background = _configured_value(
+        run_overrides, project_config, "lightcurve_background_intervals"
+    )
+    if requested_background is not None:
+        if isinstance(requested_background, str):
+            parts = [part.strip() for part in requested_background.split(",") if part.strip()]
+        else:
+            parts = [str(part).strip() for part in requested_background if str(part).strip()]
+        if parts:
+            background_interval = ",".join(parts)
+
+    return active_interval, background_interval
 
 
 def _resolve_gbm_source_dir(bnname: str, grb_name: str) -> str:
@@ -274,8 +351,15 @@ def _build_lat_selection(
     t1: float,
     catalog_row: pd.Series,
     lat_row: Optional[pd.Series],
+    trigger_met_override: Optional[float] = None,
 ) -> dict:
-    trigger_met = float(lat_row.get("trigger_met", 0.0)) if lat_row is not None else 0.0
+    trigger_met = (
+        float(trigger_met_override)
+        if trigger_met_override is not None
+        else float(lat_row.get("trigger_met", 0.0))
+        if lat_row is not None
+        else 0.0
+    )
     selection = {
         "ra": float(ra),
         "dec": float(dec),
@@ -328,10 +412,16 @@ def _run_lat_analysis(
         log(f"{bnname}: 未找到 LAT 目录行，跳过 LAT 联合拟合")
         return {"lat_plugin": None, "analysis_segments": []}
 
-    use_full_lat = bool(getattr(run_overrides, "lat_three_ml_full", None))
-    if getattr(project_config, "lat_three_ml_full", None) is not None:
-        use_full_lat = bool(project_config.lat_three_ml_full)
-    use_full_lat = use_full_lat or bool(session.lat_extended_three_ml_pipeline)
+    configured_full_lat = _configured_value(
+        run_overrides,
+        project_config,
+        "lat_three_ml_full",
+    )
+    use_full_lat = (
+        bool(configured_full_lat)
+        if configured_full_lat is not None
+        else bool(session.lat_extended_three_ml_pipeline)
+    )
 
     selection = _build_lat_selection(
         bnname=bnname,
@@ -342,6 +432,7 @@ def _run_lat_analysis(
         t1=t1,
         catalog_row=catalog_row,
         lat_row=lat_row,
+        trigger_met_override=_configured_value(run_overrides, project_config, "trigger_met"),
     )
 
     lat_result: dict = {"lat_plugin": None, "analysis_segments": []}
@@ -371,7 +462,7 @@ def _run_lat_analysis(
                 fixed_num_time_bins=fixed_num_time_bins,
                 analysis_bin_start=t0,
                 analysis_bin_end=t1,
-                return_lat_plugin=True,
+                return_lat_plugin=analysis_mode != "lat",
             )
             lat_result.setdefault("analysis_segments", [])
             lat_result.setdefault("lat_plugin", None)
@@ -425,44 +516,80 @@ def _run_gbm_analysis(
         raise RuntimeError(f"{bnname}: 未选择到可用的 GBM 探测器")
 
     summary_rows: list[dict] = []
+    time_series: dict = {}
     for seg_idx, seg in enumerate(time_segments, start=1):
         bin_start = float(seg["tstart"])
         bin_end = float(seg["tstop"])
         seg_tag = _as_text(seg.get("tag"), f"seg{seg_idx}")
-        time_series: dict = {}
         plugins: list = []
+        successful_dets: list[str] = []
         for det in dets:
-            plugin = _build_gbm_plugin_for_detector(
-                det=det,
-                grb_dir=source_dir,
-                background_interval=background_interval,
-                bin_start=bin_start,
-                bin_end=bin_end,
-                source_interval=source_interval,
-                time_series=time_series,
-                output_dir=str(gbm_dir),
-            )
+            try:
+                plugin = _build_gbm_plugin_for_detector(
+                    det=det,
+                    grb_dir=source_dir,
+                    background_interval=background_interval,
+                    bin_start=bin_start,
+                    bin_end=bin_end,
+                    source_interval=source_interval,
+                    time_series=time_series,
+                    output_dir=str(gbm_dir),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log(f"{bnname}: 探测器 {det} 构建失败，已跳过: {exc}")
+                plugin = None
             if plugin is not None:
                 plugins.append(plugin)
+                successful_dets.append(det)
         if not plugins:
-            raise RuntimeError(f"{bnname}: 时间段 {bin_start:g}-{bin_end:g} 没有成功构建 GBM 插件")
+            for model_str in models:
+                summary_rows.append(
+                    {
+                        "grb_name": grb_name,
+                        "bnname": bnname,
+                        "model": model_str,
+                        "analysis_mode": analysis_mode,
+                        "AIC": None,
+                        "BIC": None,
+                        "Flux(erg/cm2/s)": None,
+                        "FTot(erg/cm2/s)": None,
+                        "Fluence(erg/cm2)": None,
+                        "FBB(erg/cm2/s)": None,
+                        "log_marginal_likelihood": None,
+                        "duration": float(bin_end - bin_start),
+                        "num_time_bins": len(time_segments),
+                        "bin_start_time": bin_start,
+                        "bin_end_time": bin_end,
+                        "bin_duration": float(bin_end - bin_start),
+                        "result_dir": str(result_dir / model_str),
+                        "source_dir": source_dir,
+                        "segment_tag": seg_tag,
+                        "detectors": "",
+                        "analysis_status": "failed",
+                        "analysis_note": "没有成功构建 GBM 插件",
+                    }
+                )
+            continue
 
-        lat_info = _run_lat_analysis(
-            bnname=bnname,
-            grb_name=grb_name,
-            result_dir=result_dir,
-            lat_dir=result_dir / "lat",
-            analysis_mode=analysis_mode,
-            t0=bin_start,
-            t1=bin_end,
-            ra=ra,
-            dec=dec,
-            catalog_row=catalog_row,
-            project_config=project_config,
-            run_overrides=run_overrides,
-            fixed_num_time_bins=fixed_num_time_bins,
-        )
-        lat_plugin = lat_info.get("lat_plugin")
+        lat_plugin = None
+        if _mode_includes(analysis_mode, "lat"):
+            lat_info = _run_lat_analysis(
+                bnname=bnname,
+                grb_name=grb_name,
+                result_dir=result_dir,
+                lat_dir=result_dir / "lat",
+                analysis_mode=analysis_mode,
+                t0=bin_start,
+                t1=bin_end,
+                ra=ra,
+                dec=dec,
+                catalog_row=catalog_row,
+                project_config=project_config,
+                run_overrides=run_overrides,
+                fixed_num_time_bins=fixed_num_time_bins,
+            )
+            lat_plugin = lat_info.get("lat_plugin")
+        fit_mode = _effective_fit_mode(analysis_mode, lat_plugin)
         if lat_plugin is not None:
             log(
                 f"{bnname}: 本 bin [{bin_start:g}, {bin_end:g}] 已接入 LAT plugin，"
@@ -488,21 +615,27 @@ def _run_gbm_analysis(
                     datalist=datalist,
                     plugins=plugins,
                     lat_plugin=lat_plugin,
-                    dets=list(dets),
+                    dets=successful_dets,
                     result_dir=str(model_dir),
                     bin_start=bin_start,
                     bin_end=bin_end,
                     duration=duration,
-                    analysis_mode=analysis_mode,
+                    analysis_mode=fit_mode,
                 )
                 row.update(
                     {
                         "result_dir": str(model_dir),
                         "source_dir": source_dir,
                         "segment_tag": seg_tag,
-                        "detectors": ",".join(dets),
+                        "detectors": ",".join(successful_dets),
                         "analysis_status": "completed",
-                        "analysis_note": "GBM+LAT 联合拟合已恢复",
+                        "analysis_note": (
+                            "GBM+LAT 联合拟合已完成"
+                            if lat_plugin is not None
+                            else "LAT plugin 不可用，已降级为 GBM 拟合"
+                            if _mode_includes(analysis_mode, "lat")
+                            else "GBM 拟合已完成"
+                        ),
                     }
                 )
                 summary_rows.append(row)
@@ -513,7 +646,7 @@ def _run_gbm_analysis(
                         "grb_name": grb_name,
                         "bnname": bnname,
                         "model": model_str,
-                        "analysis_mode": analysis_mode,
+                        "analysis_mode": fit_mode,
                         "AIC": None,
                         "BIC": None,
                         "Flux(erg/cm2/s)": None,
@@ -529,7 +662,7 @@ def _run_gbm_analysis(
                         "result_dir": str(model_dir),
                         "source_dir": source_dir,
                         "segment_tag": seg_tag,
-                        "detectors": ",".join(dets),
+                        "detectors": ",".join(successful_dets),
                         "analysis_status": "failed",
                         "analysis_note": str(exc),
                     }
@@ -546,10 +679,8 @@ def run_single_analysis(
     run_overrides: Optional[GRBRunOverrides] = None,
 ) -> pd.DataFrame:
     from .gbm_core import (
-        _build_background_interval_string,
         _build_lat_analysis_segments,
         _determine_time_interval_and_position,
-        resolve_active_interval_from_special_and_catalog,
     )
     from .io_utils import read_catalog
     from .logging_utils import log
@@ -570,16 +701,22 @@ def run_single_analysis(
     summary_name = summary_csv_name or session.summary_csv_name
     set_result_root(str(run_root), summary_name)
 
-    mode = analysis_mode or getattr(session.extra.get("project_config"), "analysis_mode", "gbm+lat")
+    mode = str(
+        analysis_mode
+        or getattr(session.extra.get("project_config"), "analysis_mode", "gbm+lat")
+    ).strip().lower()
+    if mode not in {"gbm", "lat", "gbm+lat"}:
+        raise ValueError(f"不支持的 analysis_mode: {mode!r}")
     project_config = session.extra.get("project_config")
 
-    if target_grbs is None:
+    normalized_targets = _normalize_targets(target_grbs)
+    if normalized_targets is None:
         if "bnname" in catalog.columns:
             target_list = [str(v) for v in catalog["bnname"].dropna().astype(str).tolist()]
         else:
             target_list = [str(v) for v in catalog.index.astype(str).tolist()]
     else:
-        target_list = [str(v) for v in target_grbs]
+        target_list = normalized_targets
 
     summary_rows: list[dict] = []
     models = _default_model_list(project_config, run_overrides)
@@ -625,19 +762,16 @@ def run_single_analysis(
             ra = float(run_overrides.ra)
         if run_overrides is not None and run_overrides.dec is not None:
             dec = float(run_overrides.dec)
-        if project_config is not None and getattr(project_config, "grbname", None):
-            grb_name = _as_text(getattr(project_config, "grbname"), grb_name)
+        requested_grb_name = _configured_value(run_overrides, project_config, "grbname")
+        if requested_grb_name:
+            grb_name = _as_text(requested_grb_name, grb_name)
 
-        active_interval = resolve_active_interval_from_special_and_catalog(
-            special_cfg.get("time_segments"),
-            catalog_row,
-            str(special_cfg.get("active_interval", "")),
-        )
-        background_interval = _as_text(
-            special_cfg.get("background_interval"),
-            _build_background_interval_string(catalog_row, bnname)
-            if {"back_interval_low_start", "back_interval_low_stop", "back_interval_high_start", "back_interval_high_stop"}.issubset(catalog_row.index)
-            else "",
+        active_interval, background_interval = _resolve_runtime_intervals(
+            catalog_row=catalog_row,
+            special_cfg=special_cfg,
+            project_config=project_config,
+            run_overrides=run_overrides,
+            bnname=bnname,
         )
         raw_segments = special_cfg.get("time_segments")
         if raw_segments:
@@ -671,33 +805,77 @@ def run_single_analysis(
             models=models,
             special_yaml=special_yaml,
             special_burst_name=special_burst_name,
-            lat_three_ml_full=bool(getattr(run_overrides, "lat_three_ml_full", None) or getattr(project_config, "lat_three_ml_full", None) or session.lat_extended_three_ml_pipeline),
-            plot_joint_lightcurve=bool(getattr(run_overrides, "plot_joint_lightcurve", None) or getattr(project_config, "plot_joint_lightcurve", None)),
-            gbm_start=getattr(run_overrides, "gbm_start", None) if run_overrides is not None else getattr(project_config, "gbm_start", None),
-            gbm_stop=getattr(run_overrides, "gbm_stop", None) if run_overrides is not None else getattr(project_config, "gbm_stop", None),
-            gbm_display_pad_before_s=getattr(run_overrides, "gbm_display_pad_before_s", None) if run_overrides is not None else getattr(project_config, "gbm_display_pad_before_s", None),
-            gbm_display_pad_after_s=getattr(run_overrides, "gbm_display_pad_after_s", None) if run_overrides is not None else getattr(project_config, "gbm_display_pad_after_s", None),
+            lat_three_ml_full=bool(
+                _configured_value(
+                    run_overrides,
+                    project_config,
+                    "lat_three_ml_full",
+                    session.lat_extended_three_ml_pipeline,
+                )
+            ),
+            trigger_met=_configured_value(run_overrides, project_config, "trigger_met"),
+            plot_joint_lightcurve=bool(
+                _configured_value(run_overrides, project_config, "plot_joint_lightcurve", False)
+            ),
+            gbm_start=_configured_value(run_overrides, project_config, "gbm_start"),
+            gbm_stop=_configured_value(run_overrides, project_config, "gbm_stop"),
+            gbm_display_pad_before_s=_configured_value(
+                run_overrides, project_config, "gbm_display_pad_before_s"
+            ),
+            gbm_display_pad_after_s=_configured_value(
+                run_overrides, project_config, "gbm_display_pad_after_s"
+            ),
+            lightcurve_include_lat=_configured_value(
+                run_overrides, project_config, "lightcurve_include_lat"
+            ),
+            lightcurve_lat_prob_threshold=_configured_value(
+                run_overrides, project_config, "lightcurve_lat_prob_threshold"
+            ),
+            lightcurve_nai_bands_kev=_configured_value(
+                run_overrides, project_config, "lightcurve_nai_bands_kev"
+            ),
+            lightcurve_bgo_band_kev=_configured_value(
+                run_overrides, project_config, "lightcurve_bgo_band_kev"
+            ),
+            lightcurve_active_interval=active_interval,
+            lightcurve_background_intervals=[
+                part.strip() for part in background_interval.split(",") if part.strip()
+            ],
         )
 
         source_dir = _resolve_gbm_source_dir(bnname, grb_name)
-        lat_info = _run_lat_analysis(
-            bnname=bnname,
-            grb_name=grb_name,
-            result_dir=result_dir,
-            lat_dir=lat_dir,
-            analysis_mode=mode,
-            t0=t0,
-            t1=t1,
-            ra=ra,
-            dec=dec,
-            catalog_row=catalog_row,
-            project_config=project_config,
-            run_overrides=run_overrides,
-            fixed_num_time_bins=fixed_num_time_bins,
-        )
-        lat_plugin = lat_info.get("lat_plugin")
-
-        if _mode_includes(mode, "gbm") or _mode_includes(mode, "lat"):
+        if mode == "lat":
+            lat_info = _run_lat_analysis(
+                bnname=bnname,
+                grb_name=grb_name,
+                result_dir=result_dir,
+                lat_dir=lat_dir,
+                analysis_mode=mode,
+                t0=t0,
+                t1=t1,
+                ra=ra,
+                dec=dec,
+                catalog_row=catalog_row,
+                project_config=project_config,
+                run_overrides=run_overrides,
+                fixed_num_time_bins=fixed_num_time_bins,
+            )
+            lat_plugin = lat_info.get("lat_plugin")
+            summary_rows.append(
+                {
+                    **metadata,
+                    "result_root": str(run_root),
+                    "summary_csv_name": summary_name,
+                    "analysis_status": "completed" if lat_plugin is not None else "failed",
+                    "analysis_note": (
+                        "LAT 分析已完成"
+                        if lat_plugin is not None
+                        else "LAT plugin 构建失败"
+                    ),
+                    "source_dir": _resolve_lat_extended_dir(grb_name),
+                }
+            )
+        else:
             try:
                 gbm_rows = _run_gbm_analysis(
                     grb_name=grb_name,
@@ -730,21 +908,14 @@ def run_single_analysis(
                         "source_dir": source_dir,
                     }
                 )
-        else:
-            summary_rows.append(
-                {
-                    **metadata,
-                    "result_root": str(run_root),
-                    "summary_csv_name": summary_name,
-                    "analysis_status": "skipped",
-                    "analysis_note": f"analysis_mode={mode} 未请求 GBM/LAT 拟合",
-                    "source_dir": source_dir,
-                }
-            )
         # 光变曲线（勾选 plot_joint_lightcurve 时在拟合完成后绘制）
         want_lc = bool(
-            getattr(run_overrides, "plot_joint_lightcurve", None)
-            or getattr(project_config, "plot_joint_lightcurve", None)
+            _configured_value(
+                run_overrides,
+                project_config,
+                "plot_joint_lightcurve",
+                False,
+            )
         )
         if want_lc:
             try:
@@ -754,24 +925,23 @@ def run_single_analysis(
                 )
 
                 lat_row_lc = _lookup_lat_catalog_row(bnname)
-                trigger_met_lc = (
+                trigger_met_lc = _configured_value(
+                    run_overrides,
+                    project_config,
+                    "trigger_met",
                     float(lat_row_lc.get("trigger_met", 0.0))
                     if lat_row_lc is not None
-                    else None
+                    else None,
                 )
                 special_segs_lc = special_cfg.get("time_segments") or None
                 lc_out = result_dir / f"{grb_name}_lightcurve.png"
-                gbm_start_lc = getattr(run_overrides, "gbm_start", None) or getattr(
-                    project_config, "gbm_start", None
+                gbm_start_lc = _configured_value(run_overrides, project_config, "gbm_start")
+                gbm_stop_lc = _configured_value(run_overrides, project_config, "gbm_stop")
+                gbm_pad_before = _configured_value(
+                    run_overrides, project_config, "gbm_display_pad_before_s"
                 )
-                gbm_stop_lc = getattr(run_overrides, "gbm_stop", None) or getattr(
-                    project_config, "gbm_stop", None
-                )
-                gbm_pad_before = getattr(run_overrides, "gbm_display_pad_before_s", None) or getattr(
-                    project_config, "gbm_display_pad_before_s", None
-                )
-                gbm_pad_after = getattr(run_overrides, "gbm_display_pad_after_s", None) or getattr(
-                    project_config, "gbm_display_pad_after_s", None
+                gbm_pad_after = _configured_value(
+                    run_overrides, project_config, "gbm_display_pad_after_s"
                 )
                 include_lat_lc = bool(getattr(run_overrides, "lightcurve_include_lat", None) if run_overrides is not None and getattr(run_overrides, "lightcurve_include_lat", None) is not None else getattr(project_config, "lightcurve_include_lat", None) if project_config is not None and getattr(project_config, "lightcurve_include_lat", None) is not None else True)
                 lat_prob_threshold_lc = float(getattr(run_overrides, "lightcurve_lat_prob_threshold", None) if run_overrides is not None and getattr(run_overrides, "lightcurve_lat_prob_threshold", None) is not None else getattr(project_config, "lightcurve_lat_prob_threshold", None) if project_config is not None and getattr(project_config, "lightcurve_lat_prob_threshold", None) is not None else 0.9)
@@ -791,7 +961,7 @@ def run_single_analysis(
                     gbm_stop=gbm_stop_lc,
                     gbm_display_pad_before_s=gbm_pad_before,
                     gbm_display_pad_after_s=gbm_pad_after,
-                    plot_joint_lightcurve=bool(getattr(run_overrides, "plot_joint_lightcurve", None) or getattr(project_config, "plot_joint_lightcurve", None)),
+                    plot_joint_lightcurve=want_lc,
                     include_lat=include_lat_lc,
                     lat_prob_threshold=lat_prob_threshold_lc,
                     nai_bands_kev=tuple(tuple(map(float, b)) for b in nai_bands_lc),
@@ -807,12 +977,17 @@ def run_single_analysis(
 
     df_summary = pd.DataFrame(summary_rows)
     summary_path = run_root / summary_name
-    if not df_summary.empty:
-        _append_time_bin_info(df_summary)
-        _save_all_models_per_grb(df_summary)
-        time_analysis = _compute_time_bin_analysis(df_summary)
+    model_summary = (
+        df_summary[df_summary["model"].notna()].copy()
+        if not df_summary.empty and "model" in df_summary.columns
+        else pd.DataFrame()
+    )
+    if not model_summary.empty:
+        _append_time_bin_info(model_summary)
+        _save_all_models_per_grb(model_summary)
+        time_analysis = _compute_time_bin_analysis(model_summary)
         _save_time_bin_analysis(time_analysis)
-        _plot_model_comparison(df_summary)
+        _plot_model_comparison(model_summary)
     df_summary.to_csv(summary_path, index=False)
     session.extra["last_run_summary"] = df_summary.to_dict(orient="records")
     session.extra["last_summary_csv"] = str(summary_path)
@@ -884,7 +1059,7 @@ class GRBProject:
         summary_csv_name: Optional[str] = None,
         session_log: bool = False,
         run_overrides: Optional[GRBRunOverrides] = None,
-    ) -> None:
+    ) -> pd.DataFrame:
         apply_project_config(self.config)
         mode = analysis_mode if analysis_mode is not None else self.config.analysis_mode
         run_root = result_root or self.config.result_root
@@ -902,7 +1077,7 @@ class GRBProject:
         ov = run_overrides if run_overrides is not None else run_overrides_from_config(self.config)
         session.extra["project_config"] = self.config
         from .pipeline import main
-        main(
+        return main(
             tg,
             mode,
             result_root=run_root,

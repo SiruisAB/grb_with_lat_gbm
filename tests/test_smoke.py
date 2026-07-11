@@ -13,7 +13,6 @@ FORBIDDEN_TOKENS = {
     "task_models",
     "batch_analyze",
     "cli.py",
-    "__main__.py",
     "task_paths",
     "TaskStore",
     "TaskStatus",
@@ -52,10 +51,17 @@ class SmokeTests(unittest.TestCase):
             "task_models.py",
             "batch_analyze.py",
             "cli.py",
-            "__main__.py",
             "task_paths.py",
         ):
             self.assertFalse((package_root / filename).exists(), msg=f"unexpected leftover file: {filename}")
+
+    def test_cli_parser_accepts_single_analysis_arguments(self) -> None:
+        from grb_project.pipeline import parse_args
+
+        args = parse_args(["--grbs", "bn123", "--analysis-mode", "gbm", "--session-log"])
+        self.assertEqual(args.grbs, ["bn123"])
+        self.assertEqual(args.analysis_mode, "gbm")
+        self.assertTrue(args.session_log)
 
     def test_special_burst_loader_normalizes_time_fields(self) -> None:
         from grb_project.special_bursts import load_special_burst_config

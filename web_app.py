@@ -234,6 +234,8 @@ def _target_defaults(catalog_row: pd.Series, lat_row: Optional[pd.Series], targe
     return {
         "grb_name": grb_name,
         "trigger_met": trigger_met,
+        "t0": default_t0,
+        "t1": default_t1,
         "t90_start": t90_start,
         "t90": t90,
         "ra": ra,
@@ -261,6 +263,18 @@ def _show_result_summary(st, *, result_path: Path, metadata: Optional[dict] = No
     if metadata is not None:
         with st.expander("本次使用的参数", expanded=False):
             st.json(metadata)
+
+
+def _analysis_succeeded(summary: pd.DataFrame) -> bool:
+    return (
+        not summary.empty
+        and "analysis_status" in summary.columns
+        and summary["analysis_status"].astype(str).eq("completed").any()
+    )
+
+
+def _single_result_dir(result_root: str, grb_name: str) -> Path:
+    return Path(result_root).expanduser() / grb_name
 
 
 def _show_target_context(st, *, defaults: dict[str, object]) -> None:
@@ -361,6 +375,7 @@ def _run_single_analysis_page(
             grbname=grb_name.strip() or str(defaults["grb_name"]),
             t0=float(t0),
             t1=float(t1),
+            trigger_met=float(trigger_met),
             ra=float(ra),
             dec=float(dec),
             lat_three_ml_full=bool(lat_three_ml_full),
@@ -383,6 +398,7 @@ def _run_single_analysis_page(
         project.config.grbname = grb_name.strip() or str(defaults["grb_name"])
         project.config.t0 = run_overrides.t0
         project.config.t1 = run_overrides.t1
+        project.config.trigger_met = run_overrides.trigger_met
         project.config.ra = run_overrides.ra
         project.config.dec = run_overrides.dec
         project.config.lat_three_ml_full = run_overrides.lat_three_ml_full
@@ -400,7 +416,7 @@ def _run_single_analysis_page(
 
         with st.spinner("正在运行单次分析..."):
             try:
-                project.run(
+                summary = project.run(
                     target_grbs=[target],
                     analysis_mode=analysis_mode,
                     result_root=result_root_value,
@@ -408,8 +424,14 @@ def _run_single_analysis_page(
                     session_log=session_log,
                     run_overrides=run_overrides,
                 )
-                final_result_dir = Path(result_root_value) / (grb_name.strip() or str(defaults["grb_name"])) / target
-                _show_result_summary(st, result_path=final_result_dir)
+                final_result_dir = _single_result_dir(
+                    result_root_value,
+                    grb_name.strip() or str(defaults["grb_name"]),
+                )
+                if _analysis_succeeded(summary):
+                    _show_result_summary(st, result_path=final_result_dir)
+                else:
+                    st.error(f"分析未成功完成，请查看摘要和日志：{final_result_dir}")
             except Exception as exc:  # noqa: BLE001
                 st.error(f"运行失败：{exc}")
 
@@ -468,6 +490,9 @@ def _run_lightcurve_page(
     special_burst_name = st.text_input("special_burst_name", value="", key="lc_special_burst_name")
 
     if st.button("生成光变曲线", type="primary", key="lc_run_button"):
+        if not plot_joint_lightcurve:
+            st.info("已关闭 plot_joint_lightcurve，未生成光变曲线。")
+            return
         result_root_value = str(Path(result_root).expanduser())
         project = _build_project(base_cfg, analysis_mode="gbm+lat", result_root=result_root_value, summary_csv_name=base_cfg.summary_csv_name)
         project.config.data_dir = str(Path(data_dir).expanduser())

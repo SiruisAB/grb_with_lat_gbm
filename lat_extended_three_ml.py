@@ -46,10 +46,12 @@ from GtBurst.dataHandling import _makeDatasetsOutOfLATdata
 
 from .gbm_core import _build_lat_gcn_t95_segments
 from .logging_utils import log
+from .process_utils import wait_for_worker_result
 from .runtime_env import ensure_analysis_runtime
 
 
 _LAT_PIPELINE_TIME_PAD_S = 5.0
+_LAT_WORKER_TIMEOUT_S = 3600.0
 
 
 @contextlib.contextmanager
@@ -656,8 +658,14 @@ def _run_lat_extended_three_ml_impl(
         result_data["lat_plugin_key"] = primary_key
         result_data["lat_plugin"] = plugins[primary_key]
 
-        fit_results = _fit_lat_plugins(plugins=plugins, segments=analysis_segments, selection=selection)
-        _save_spectra_plots(fit_results, analysis_segments)
+        fit_results = {}
+        if not return_lat_plugin:
+            fit_results = _fit_lat_plugins(
+                plugins=plugins,
+                segments=analysis_segments,
+                selection=selection,
+            )
+            _save_spectra_plots(fit_results, analysis_segments)
 
         valid_jl = [jl for jl in fit_results.values() if jl is not None]
         if valid_jl:
@@ -735,12 +743,10 @@ def run_lat_extended_three_ml_pipeline(
         name=f"lat-ext-{bn_name}-{uuid.uuid4().hex[:8]}",
     )
     proc.start()
-    proc.join()
-
-    if not queue.empty():
-        status, payload = queue.get()
-    else:
-        status, payload = ("error", {"error": f"LAT 子进程无返回值，exitcode={proc.exitcode}"})
+    try:
+        status, payload = wait_for_worker_result(proc, queue, _LAT_WORKER_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise RuntimeError(f"LAT 子进程超时: {exc}") from exc
 
     if proc.exitcode != 0:
         if status == "ok":

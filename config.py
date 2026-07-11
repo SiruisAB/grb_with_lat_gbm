@@ -21,6 +21,7 @@ class GRBProjectConfig:
     grbname: Optional[str] = None
     t0: Optional[float] = None
     t1: Optional[float] = None
+    trigger_met: Optional[float] = None
     ra: Optional[float] = None
     dec: Optional[float] = None
     lat_three_ml_full: Optional[bool] = None
@@ -46,6 +47,7 @@ class GRBRunOverrides:
     grbname: Optional[str] = None
     t0: Optional[float] = None
     t1: Optional[float] = None
+    trigger_met: Optional[float] = None
     ra: Optional[float] = None
     dec: Optional[float] = None
     lat_three_ml_full: Optional[bool] = None
@@ -71,6 +73,7 @@ class GRBRunOverrides:
                 "grbname",
                 "t0",
                 "t1",
+                "trigger_met",
                 "ra",
                 "dec",
                 "lat_three_ml_full",
@@ -97,6 +100,7 @@ def run_overrides_from_config(cfg: GRBProjectConfig) -> Optional[GRBRunOverrides
         grbname=cfg.grbname,
         t0=cfg.t0,
         t1=cfg.t1,
+        trigger_met=cfg.trigger_met,
         ra=cfg.ra,
         dec=cfg.dec,
         lat_three_ml_full=cfg.lat_three_ml_full,
