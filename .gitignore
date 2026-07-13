@@ -5,3 +5,7 @@ __pycache__/
 *.log
 results*/
 results3/
+.worktrees/
+/test/
+gtmktime.par
+gtselect.par

@@ -87,9 +87,9 @@ def _silence_stdio() -> Iterator[None]:
         os.close(devnull_fd)
 
 
-def _resolve_ft_paths(grb_dir: str, bn_name: str, extended_data_dir: str) -> tuple[str, str]:
-    """优先使用 `result_root/GRBname/bnname` 下的文件，不存在就从 Extended 目录复制一份过来。"""
-    target_dir = os.path.join(grb_dir, bn_name)
+def _resolve_ft_paths(lat_dir: str, bn_name: str, extended_data_dir: str) -> tuple[str, str]:
+    """优先使用 LAT 根目录下的 ``bnname`` 数据目录。"""
+    target_dir = os.path.join(lat_dir, bn_name)
     os.makedirs(target_dir, exist_ok=True)
 
     ft1_local = os.path.join(target_dir, f"gll_ft1_tr_{bn_name}_v00.fit")
@@ -99,8 +99,8 @@ def _resolve_ft_paths(grb_dir: str, bn_name: str, extended_data_dir: str) -> tup
 
     source_candidates = [
         (
-            os.path.join(grb_dir, f"gll_ft1_tr_{bn_name}_v00.fit"),
-            os.path.join(grb_dir, f"gll_ft2_tr_{bn_name}_v00.fit"),
+            os.path.join(lat_dir, f"gll_ft1_tr_{bn_name}_v00.fit"),
+            os.path.join(lat_dir, f"gll_ft2_tr_{bn_name}_v00.fit"),
         ),
         (
             os.path.join(extended_data_dir, f"gll_ft1_tr_{bn_name}_v00.fit"),
@@ -532,10 +532,10 @@ def _run_lat_extended_three_ml_impl(
 ) -> Dict[str, Any]:
     result_data: Dict[str, Any] = {}
 
-    bn_dir = os.path.join(bn_dir, bn_name)
+    lat_dir = str(Path(bn_dir).expanduser().resolve())
 
-    with _working_directory(bn_dir):
-        gtburst_data_repository = os.path.abspath(result_parent)
+    with _working_directory(lat_dir):
+        gtburst_data_repository = lat_dir
 
         t0_core = float(selection["tstart"])
         t1_core = float(selection["tstop"])
@@ -547,7 +547,8 @@ def _run_lat_extended_three_ml_impl(
             f"[{t0_lat:g}, {t1_lat:g}] s"
         )
 
-        ft1_file, ft2_file = _resolve_ft_paths(bn_dir, bn_name, extended_data_dir)
+        ft1_file, ft2_file = _resolve_ft_paths(lat_dir, bn_name, extended_data_dir)
+        dataset_dir = os.path.join(lat_dir, bn_name)
         _makeDatasetsOutOfLATdata(
             ft1_file,
             ft2_file,
@@ -557,7 +558,7 @@ def _run_lat_extended_three_ml_impl(
             selection["ra"],
             selection["dec"],
             selection["trigger_time"],
-            bn_dir,
+            dataset_dir,
         )
 
         lat_ds = LAT_dataset()
@@ -569,7 +570,7 @@ def _run_lat_extended_three_ml_impl(
             t0_lat,
             t1_lat,
             selection.get("data_type", "Extended"),
-            result_parent,
+            lat_dir,
             float(selection.get("Emin", 100.0)),
             float(selection.get("Emax", 100000.0)),
         )
@@ -700,8 +701,8 @@ def _run_lat_extended_three_ml_impl(
             encoding="utf-8",
         )
 
-        log(f"LAT Extended threeML 流水线结束，输出目录: {bn_dir}")
-        result_data["working_directory"] = bn_dir
+        log(f"LAT Extended threeML 流水线结束，输出目录: {lat_dir}")
+        result_data["working_directory"] = lat_dir
         return result_data
 
 

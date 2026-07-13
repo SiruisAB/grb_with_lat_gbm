@@ -323,7 +323,7 @@ def run_joint_lightcurve(
         grb_name=grb_name,
         trigger_met=trigger_met,
         data_dir=data_dir,
-        lat_prob_bn_dir=lat_dir / bnname,
+        lat_prob_bn_dir=lat_dir,
         include_lat=include_lat,
         lat_prob_threshold=lat_prob_threshold,
         gbm_start=gbm_start,

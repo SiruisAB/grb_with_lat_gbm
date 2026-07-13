@@ -10,6 +10,14 @@ from typing import Optional, Sequence
 @dataclass
 class GRBProjectConfig:
     data_dir: str = "/home/mxr/lee/gbmtest/GBM_data"
+    gbm_download_dir: str = "/home/mxr/lee/gbmtest/GBM_data"
+    lat_filtered_csv: str = "/home/mxr/lee/data/GRB_FermiLAT_filtered.csv"
+    gbm_download_year_from: int = 2022
+    gcn_archive_url: str = "https://gcn.nasa.gov/circulars/archive.json.tar.gz"
+    gcn_archive_tar: str = "/home/mxr/lee/data/archive.json.tar.gz"
+    gcn_archive_dir: str = "/home/mxr/lee/data/archive.json"
+    lat_gcn_output_csv: str = "/home/mxr/lee/data/GRB_FermiLAT_Time_Extended.csv"
+    lat_download_root: str = "/home/mxr/lee/data/fermilat/Extended_data_ex"
     catalog_xls: str = "/home/mxr/lee/data/GBMcatolog.xls"
     merged_xls: str = "/home/mxr/lee/newflietest/merged_grb_fit_results.xlsx"
     fermilat_grb_xls: str = "/home/mxr/lee/fermilat-grb.xls"

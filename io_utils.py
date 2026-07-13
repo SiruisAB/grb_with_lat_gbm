@@ -117,7 +117,7 @@ def copy_extended_lat_to_bn_dir(
     将 ``Extended_data_ex/{grb_name}/`` 下的 LAT 文件复制到当前 GRB 的 ``{bn_name}`` 结果目录。
 
     :param grb_name: GCN 名称（与 Extended_data_ex 子目录名一致，如 GRB231129C）
-    :param dest_bn_dir: 目标目录，一般为 ``{result_root}/{grb_name}/{bn_name}``
+    :param dest_bn_dir: 目标目录，必须为 ``{result_root}/{grb_name}/lat/{bn_name}``
     :param extended_root: 默认为 ``session.extended_lat_data_root``
     :return: 是否执行了复制（源目录存在且至少复制了一个文件则为 True）
     """

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -44,7 +45,7 @@ def main(
             session.log_file_handle = None
 
 
-def parse_args(argv=None) -> argparse.Namespace:
+def _build_analysis_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fermi GBM/LAT single-GRB analysis")
     parser.add_argument("--grbs", nargs="+", default=None)
     parser.add_argument("--analysis-mode", choices=("gbm", "lat", "gbm+lat"), default="gbm+lat")
@@ -56,11 +57,68 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--plot-joint-lightcurve", dest="plot_joint_lightcurve", action="store_true")
     parser.add_argument("--no-plot-joint-lightcurve", dest="plot_joint_lightcurve", action="store_false")
     parser.set_defaults(plot_joint_lightcurve=None)
-    return parser.parse_args(argv)
+    return parser
+
+
+def _build_download_parser() -> argparse.ArgumentParser:
+    from .gbm_download import add_download_arguments
+
+    parser = argparse.ArgumentParser(description="Download Fermi GBM burst data")
+    add_download_arguments(parser)
+    return parser
+
+
+def _build_lat_gcn_parser() -> argparse.ArgumentParser:
+    from .lat_gcn_extract import add_extract_arguments
+
+    parser = argparse.ArgumentParser(description="Refresh GCN archive and extract Fermi-LAT data")
+    add_extract_arguments(parser)
+    return parser
+
+
+def _build_lat_download_parser() -> argparse.ArgumentParser:
+    from .lat_download import add_download_arguments
+
+    parser = argparse.ArgumentParser(description="Download Fermi-LAT Extended data through threeML")
+    add_download_arguments(parser)
+    return parser
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "download-gbm":
+        args = _build_download_parser().parse_args(argv[1:])
+        args.command = "download-gbm"
+        return args
+    if argv and argv[0] == "update-lat-gcn":
+        args = _build_lat_gcn_parser().parse_args(argv[1:])
+        args.command = "update-lat-gcn"
+        return args
+    if argv and argv[0] == "download-lat":
+        args = _build_lat_download_parser().parse_args(argv[1:])
+        args.command = "download-lat"
+        return args
+
+    args = _build_analysis_parser().parse_args(argv)
+    args.command = "analyze"
+    return args
 
 
 def cli_main(argv=None):
     args = parse_args(argv)
+    if args.command == "download-gbm":
+        from .gbm_download import cli_main_from_args
+
+        return cli_main_from_args(args)
+    if args.command == "update-lat-gcn":
+        from .lat_gcn_extract import cli_main_from_args
+
+        return cli_main_from_args(args)
+    if args.command == "download-lat":
+        from .lat_download import cli_main_from_args
+
+        return cli_main_from_args(args)
+
     overrides = GRBRunOverrides(
         lat_three_ml_full=True if args.lat_extended_three_ml else None,
         plot_joint_lightcurve=args.plot_joint_lightcurve,
