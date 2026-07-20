@@ -57,13 +57,16 @@ def test_public_axis_style_hides_top_and_right_ticks_and_spines():
         plt.close(fig)
 
 
-def test_bgo_rebin_axis_caps_last_center_at_40_mev_and_has_positive_errors():
+def test_bgo_rebin_axis_uses_active_range_and_keeps_centers_below_40_mev():
     from grb_project.separate_spectr import _build_bgo_rebin_axis
 
-    wavelength = np.logspace(np.log10(150.0), np.log10(50_000.0), 128)
-    centers, err_low, err_high = _build_bgo_rebin_axis(wavelength)
+    energy_min = np.array([200.0, 300.0, 20_000.0])
+    energy_max = np.array([300.0, 20_000.0, 42_000.0])
+    centers, err_low, err_high = _build_bgo_rebin_axis((energy_min, energy_max))
 
-    assert centers[-1] == pytest.approx(40_000.0)
+    assert centers[-1] < 40_000.0
+    assert centers[0] - err_low[0] == pytest.approx(200.0)
+    assert centers[-1] + err_high[-1] == pytest.approx(40_000.0)
     assert np.all(err_low > 0)
     assert np.all(err_high > 0)
 

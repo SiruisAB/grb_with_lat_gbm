@@ -100,22 +100,30 @@ PAPER_LEGEND_STYLE = {
 }
 
 BGO_REBIN_MAX_KEV = 4.0e4
+BGO_REBIN_BIN_COUNT = 21
 
 
-def _build_bgo_rebin_axis(wavelength: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    wavelength = np.asarray(wavelength, dtype=float)
-    if wavelength.ndim != 1 or wavelength.size < 6:
-        raise ValueError("BGO wavelength grid must contain at least six channels")
-    if np.any(wavelength <= 0) or np.any(np.diff(wavelength) <= 0):
-        raise ValueError("BGO wavelength grid must be positive and strictly increasing")
+def _build_bgo_rebin_axis(energy_boundaries) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if len(energy_boundaries) != 2:
+        raise ValueError("BGO energy boundaries must contain lower and upper arrays")
+    energy_min = np.asarray(energy_boundaries[0], dtype=float)
+    energy_max = np.asarray(energy_boundaries[1], dtype=float)
+    if energy_min.ndim != 1 or energy_max.ndim != 1 or energy_min.size == 0:
+        raise ValueError("BGO energy boundary arrays must be non-empty and one-dimensional")
+    if energy_min.size != energy_max.size or np.any(energy_max <= energy_min):
+        raise ValueError("BGO energy boundary arrays are inconsistent")
 
-    upper_energy = min(float(wavelength[-3]), BGO_REBIN_MAX_KEV)
-    centers = np.logspace(np.log10(wavelength[2]), np.log10(upper_energy), 21)
+    lower_energy = float(energy_min[0])
+    upper_energy = min(float(energy_max[-1]), BGO_REBIN_MAX_KEV)
+    if lower_energy <= 0 or upper_energy <= lower_energy:
+        raise ValueError("BGO active energy range is invalid")
 
-    edges = np.empty(centers.size + 1, dtype=float)
-    edges[1:-1] = np.sqrt(centers[:-1] * centers[1:])
-    edges[0] = centers[0] ** 2 / edges[1]
-    edges[-1] = centers[-1] ** 2 / edges[-2]
+    edges = np.logspace(
+        np.log10(lower_energy),
+        np.log10(upper_energy),
+        BGO_REBIN_BIN_COUNT + 1,
+    )
+    centers = np.sqrt(edges[:-1] * edges[1:])
     return centers, centers - edges[:-1], edges[1:] - centers
 
 
@@ -1000,7 +1008,9 @@ def discrete_spectr(
 
     # select data x-range
     wavelength = fluence_plugins[bgo_index]._observed_spectrum.mid_points
-    rebinnedWavelength, rebinnedWavelengthErrNeg, rebinnedWavelengthErrPos = _build_bgo_rebin_axis(wavelength)
+    rebinnedWavelength, rebinnedWavelengthErrNeg, rebinnedWavelengthErrPos = _build_bgo_rebin_axis(
+        fluence_plugins[bgo_index].energy_boundaries
+    )
     # rebin y-axis
     rebinned = spectres.spectres(rebinnedWavelength, wavelength, dataOrigin, spec_errs=dataOriginErr)
     rebinnedFlux = rebinned[0]
