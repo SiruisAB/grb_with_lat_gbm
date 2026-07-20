@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 
 
 def _write_fluxdata_file(path: Path, rows: list[tuple[float, float, float, float, float, float]]) -> None:
@@ -54,6 +55,17 @@ def test_public_axis_style_hides_top_and_right_ticks_and_spines():
         assert ax.spines["bottom"].get_visible()
     finally:
         plt.close(fig)
+
+
+def test_bgo_rebin_axis_caps_last_center_at_40_mev_and_has_positive_errors():
+    from grb_project.separate_spectr import _build_bgo_rebin_axis
+
+    wavelength = np.logspace(np.log10(150.0), np.log10(50_000.0), 128)
+    centers, err_low, err_high = _build_bgo_rebin_axis(wavelength)
+
+    assert centers[-1] == pytest.approx(40_000.0)
+    assert np.all(err_low > 0)
+    assert np.all(err_high > 0)
 
 
 def test_group_fluxdata_files_by_timebin(tmp_path: Path):

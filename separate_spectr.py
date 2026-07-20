@@ -99,6 +99,25 @@ PAPER_LEGEND_STYLE = {
     "labelspacing": 0.45,
 }
 
+BGO_REBIN_MAX_KEV = 4.0e4
+
+
+def _build_bgo_rebin_axis(wavelength: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    wavelength = np.asarray(wavelength, dtype=float)
+    if wavelength.ndim != 1 or wavelength.size < 6:
+        raise ValueError("BGO wavelength grid must contain at least six channels")
+    if np.any(wavelength <= 0) or np.any(np.diff(wavelength) <= 0):
+        raise ValueError("BGO wavelength grid must be positive and strictly increasing")
+
+    upper_energy = min(float(wavelength[-3]), BGO_REBIN_MAX_KEV)
+    centers = np.logspace(np.log10(wavelength[2]), np.log10(upper_energy), 21)
+
+    edges = np.empty(centers.size + 1, dtype=float)
+    edges[1:-1] = np.sqrt(centers[:-1] * centers[1:])
+    edges[0] = centers[0] ** 2 / edges[1]
+    edges[-1] = centers[-1] ** 2 / edges[-2]
+    return centers, centers - edges[:-1], edges[1:] - centers
+
 
 def _style_publication_axes(ax):
     ax.tick_params(
@@ -981,13 +1000,7 @@ def discrete_spectr(
 
     # select data x-range
     wavelength = fluence_plugins[bgo_index]._observed_spectrum.mid_points
-    rebinnedWavelength = np.logspace(np.log10(wavelength[2]),np.log10(wavelength[-3]),21)
-
-    # rebin x-axis
-    rebinnedWavelengthFull = np.insert(rebinnedWavelength, 0, 250)
-    rebinnedWavelengthFull = np.append(rebinnedWavelengthFull, 1.5e4)
-    rebinnedWavelengthErrPos = (rebinnedWavelengthFull[2:] - rebinnedWavelengthFull[1:-1])/2
-    rebinnedWavelengthErrNeg = (rebinnedWavelengthFull[1:-1] - rebinnedWavelengthFull[:-2])/2
+    rebinnedWavelength, rebinnedWavelengthErrNeg, rebinnedWavelengthErrPos = _build_bgo_rebin_axis(wavelength)
     # rebin y-axis
     rebinned = spectres.spectres(rebinnedWavelength, wavelength, dataOrigin, spec_errs=dataOriginErr)
     rebinnedFlux = rebinned[0]
