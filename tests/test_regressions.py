@@ -762,5 +762,169 @@ class ReviewFixRegressionTests(unittest.TestCase):
         self.assertNotEqual((best_by_sigma["roi"], best_by_sigma["zmax"]), (roi, zmax))
 
 
+    # ---- discrete_spectr 的模型构造分支 ----
+
+    @staticmethod
+    def _discrete_spectr_branches():
+        """按模型名取出 discrete_spectr 里给 modelTotal 赋值的那些 if 分支。
+
+        直接解析源码而不是把构造逻辑抄一遍：抄一遍就等于又多了一份重复定义，
+        而重复定义正是这些分支出问题的根源。
+        """
+        import ast
+
+        from grb_project import separate_spectr
+
+        source = Path(separate_spectr.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        func = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "discrete_spectr"
+        )
+
+        branches = {}
+        for node in func.body:
+            if not isinstance(node, ast.If):
+                continue
+            assigns_total = any(
+                isinstance(target, ast.Name) and target.id == "modelTotal"
+                for stmt in ast.walk(node)
+                if isinstance(stmt, ast.Assign)
+                for target in stmt.targets
+            )
+            if not assigns_total:
+                continue
+            for sub in ast.walk(node.test):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    branches[sub.value] = node
+        return branches
+
+    def test_every_web_selectable_model_can_be_plotted(self) -> None:
+        """网页上能选的模型，discrete_spectr 必须都有构造分支。
+
+        SBPL 与 band+mbb 曾经只在 modelbuild 里有定义、在 discrete_spectr 里没有，
+        于是 modelTotal 未绑定，分离谱在 bayesian_fit 的 except 里被吞成一行警告：
+        拟合跑完了、AIC/BIC 进了表，图却永远不存在。
+        """
+        from grb_project.web_app import SUPPORTED_MODELS
+
+        covered = set(self._discrete_spectr_branches())
+        missing = sorted(set(SUPPORTED_MODELS) - covered)
+        self.assertEqual(missing, [], f"这些模型能选能拟合，却画不出分离谱: {missing}")
+
+    def test_discrete_spectr_reproduces_build_model_for_every_model(self) -> None:
+        """同一组参数下，出图用的模型必须和拟合用的模型是同一条谱。
+
+        两处各写一遍模型定义，历史上已经在 comp 的 pivot 上错出过约 1000 倍
+        （pivot 默认 1 keV vs 拟合时的 100 keV）。这里把每个分支单独执行一遍，
+        再和 modelbuild.build_model 的输出逐点比。
+        """
+        import ast
+
+        import numpy as np
+
+        from grb_project import separate_spectr
+        from grb_project.modelbuild import build_model
+        from grb_project.web_app import SUPPORTED_MODELS
+
+        branches = self._discrete_spectr_branches()
+        energies = np.logspace(np.log10(8.0), 5.0, 60)
+
+        for model_str in SUPPORTED_MODELS:
+            with self.subTest(model=model_str):
+                node = branches[model_str]
+                reference = build_model(model_str)
+                values = [float(par.value) for par in reference.free_parameters.values()]
+
+                namespace = dict(vars(separate_spectr))
+                namespace.update(
+                    model_str=model_str,
+                    parameter_values=values,
+                    analysis_mode="gbm",
+                )
+                exec(  # noqa: S102 - 就是要执行源码里的那一段
+                    compile(ast.Module(body=[node], type_ignores=[]), "<branch>", "exec"),
+                    namespace,
+                )
+
+                expected = np.asarray(reference(energies), dtype=float)
+                actual = np.asarray(namespace["modelTotal"](energies), dtype=float)
+                np.testing.assert_allclose(actual, expected, rtol=1e-10)
+
+    def test_sbpl_reads_the_break_energy_not_beta(self) -> None:
+        """SBPL 的自由参数顺序是 K, alpha, break_energy, beta。
+
+        转折能量在第 2 位；原先几处写的是第 3 位，取到的是 beta。beta 是负数，
+        np.log10(beta*0.1) 直接给出 nan，加密采样和 y 轴范围会一起废掉。
+        """
+        import ast
+
+        import numpy as np
+
+        from grb_project import separate_spectr
+        from grb_project.modelbuild import build_model
+
+        free_names = [name.split(".")[-1] for name in build_model("SBPL").free_parameters]
+        self.assertEqual(free_names, ["K", "alpha", "break_energy", "beta"])
+
+        source = Path(separate_spectr.__file__).read_text(encoding="utf-8")
+        func = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == "discrete_spectr"
+        )
+
+        # 取出所有出现在 np.log10(...) 里的 parameter_values[N]
+        indices = set()
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "log10"):
+                continue
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, ast.Subscript)
+                    and isinstance(sub.value, ast.Name)
+                    and sub.value.id == "parameter_values"
+                    and isinstance(sub.slice, ast.Constant)
+                ):
+                    indices.add(sub.slice.value)
+
+        self.assertEqual(
+            indices,
+            {free_names.index("break_energy")},
+            "np.log10 只应作用在 break_energy 上，取到 beta 会得到 nan",
+        )
+        # 反过来钉一下：真按 beta 取，结果确实是 nan。
+        beta = float(list(build_model("SBPL").free_parameters.values())[3].value)
+        self.assertLess(beta, 0.0)
+        with np.errstate(invalid="ignore"):
+            self.assertTrue(np.isnan(np.log10(beta * 0.1)))
+
+    def test_sbpl_only_resamples_the_break_once(self) -> None:
+        """转折能量附近的加密采样只能做一次。
+
+        原先有两段逐字相同的加密采样先后执行，同样的 100 个点被塞进 xs 两遍，
+        落盘的模型曲线文件也跟着多出 100 行重复采样。
+        """
+        import ast
+
+        from grb_project import separate_spectr
+
+        source = Path(separate_spectr.__file__).read_text(encoding="utf-8")
+        assignments = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "xs_around_E0"
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(len(assignments), 1)
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,9 +70,10 @@ try:
         Powerlaw,
         Uniform_prior,
         NonDissipativePhotosphere,
+        SmoothlyBrokenPowerLaw,
     )
 except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
-    Band = Blackbody = Cutoff_powerlaw = Gaussian = Log_uniform_prior = Model = PointSource = Powerlaw = Uniform_prior = NonDissipativePhotosphere = None
+    Band = Blackbody = Cutoff_powerlaw = Gaussian = Log_uniform_prior = Model = PointSource = Powerlaw = Uniform_prior = NonDissipativePhotosphere = SmoothlyBrokenPowerLaw = None
 
 try:
     from threeML import *  # noqa: F401,F403
@@ -80,9 +81,11 @@ except ImportError:  # pragma: no cover - optional dependency in redraw-only env
     pass
 
 try:
-    from .modelbuild import MultiColorBlackBody, build_model
+    # _energy_bounds_for_mode 是同包内的私有工具，这里借它把新分支的能量类
+    # 参数硬边界与 modelbuild 保持同源，避免再抄一份 8 keV / 40 MeV / 100 GeV。
+    from .modelbuild import MultiColorBlackBody, _energy_bounds_for_mode, build_model
 except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
-    MultiColorBlackBody = build_model = None
+    MultiColorBlackBody = _energy_bounds_for_mode = build_model = None
 
 configure_publication_matplotlib()
 
@@ -1275,6 +1278,21 @@ def discrete_spectr(
         modelTotal=model1
         model_str1='Band'
 
+    if model_str == 'SBPL':
+        # SBPL: K, alpha, break_energy, beta（与 modelbuild.py 的自由参数顺序一致）。
+        # break_scale 与 pivot 拟合时都不放开，这里沿用 SmoothlyBrokenPowerLaw 的
+        # 默认值 0.5 / 100 keV——与 modelbuild 里显式写的那两个值相同。
+        model1 = SmoothlyBrokenPowerLaw()
+        # 裸构造出来的硬边界比拟合时窄（alpha 上限 2.0、beta 下限 -5、break_energy
+        # 下限 10 keV），落在放宽区间里的拟合结果直接赋值会被 astromodels 拒掉，
+        # 所以先把边界对齐 modelbuild 的设置。
+        model1.alpha.min_value, model1.alpha.max_value = -2.0, 5.0
+        model1.beta.min_value, model1.beta.max_value = -10.0, -1.5
+        model1.break_energy.min_value, model1.break_energy.max_value = _energy_bounds_for_mode(analysis_mode)
+        model1.K, model1.alpha, model1.break_energy, model1.beta = parameter_values[:4]
+        modelTotal = model1
+        model_str1 = 'SBPL'
+
     if model_str == 'comp+pl':
 
         model1 = Cutoff_powerlaw(piv=1E2)
@@ -1313,6 +1331,21 @@ def discrete_spectr(
         modelTotal = model1 + model2
         model_str1 = 'mBB'
         model_str2 = 'PL'
+
+    if model_str == 'band+mbb':
+        # Band + mBB: K, alpha, xp, beta, K_mbb, kT_min, kT_max, m（与 modelbuild.py 一致）
+        energy_bounds = _energy_bounds_for_mode(analysis_mode)
+        model1 = Band(piv=1E2)
+        # 同 SBPL：xp / kT_min / kT_max 的默认硬边界比拟合时窄，先对齐再赋值。
+        model1.xp.min_value, model1.xp.max_value = energy_bounds
+        model1.K, model1.alpha, model1.xp, model1.beta = parameter_values[:4]
+        model2 = MultiColorBlackBody()
+        model2.kT_min.min_value, model2.kT_min.max_value = energy_bounds
+        model2.kT_max.min_value, model2.kT_max.max_value = energy_bounds
+        model2.K, model2.kT_min, model2.kT_max, model2.m = parameter_values[4:8]
+        modelTotal = model1 + model2
+        model_str1 = 'Band'
+        model_str2 = 'mBB'
 
     if model_str == 'band+bb':
         model1 = Band(K=parameter_values[0],alpha=parameter_values[1],xp=parameter_values[2],beta=parameter_values[3],piv=1E2)          # 先用默认值构造出来
@@ -1882,7 +1915,9 @@ def discrete_spectr(
         #     fluxEpeak = max(k0*xs*xs*modelTotal(xs))
         #     flux100mev = fluxPL[np.where( xs == 100000.0)]
         elif model_str in ['SBPL']:
-            Epeak = parameter_values[3]  # E0作为参考峰值
+            # 自由参数顺序是 K, alpha, break_energy, beta，转折能量在第 2 位；
+            # 原先写的 [3] 是 beta（负数）。
+            Epeak = parameter_values[2]  # E0作为参考峰值
             fluxEpeak = max(k0*xs*xs*modelTotal(xs))
             flux100mev = fluxPL[np.where( xs == 100000.0)]
         else:
@@ -1971,12 +2006,10 @@ def discrete_spectr(
 
     plt.xlim([5e0, emax*2.0])
 
-    if model_str == 'SBPL':
-        # 在转折能量附近多采样一些点以更好地显示转折特征
-        xs_around_E0 = np.logspace(np.log10(parameter_values[3]*0.1), 
-                                    np.log10(parameter_values[3]*10), 100)
-        xs = np.sort(np.append(xs, xs_around_E0))
-
+    # 这里原本还有一段与下方 SBPL 分支逐字相同的加密采样，两段都执行会把同样
+    # 的 100 个采样点往 xs 里塞两遍（落盘的模型曲线文件也跟着多出 100 行重复）。
+    # 下方那段末尾会重新算一次 y 轴范围、把这里算的覆盖掉，所以删掉前一段对出图
+    # 没有影响，只是不再产生重复采样点。
     plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.1, k0*max(xs*xs*modelTotal(xs))*500.0])
     if model_str == 'pl':
         plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.1, k0*max(xs*xs*modelTotal(xs))*500.0])
@@ -2020,8 +2053,10 @@ def discrete_spectr(
 
     if model_str == 'SBPL':
         # 在转折能量附近多采样一些点以更好地显示转折特征
-        xs_around_E0 = np.logspace(np.log10(parameter_values[3]*0.1), 
-                                    np.log10(parameter_values[3]*10), 100)
+        # parameter_values[2] 是 break_energy；原先写的 [3] 是 beta，为负数，
+        # np.log10 会直接给出 nan，整条曲线和 y 轴范围都会废掉。
+        xs_around_E0 = np.logspace(np.log10(parameter_values[2]*0.1),
+                                    np.log10(parameter_values[2]*10), 100)
         xs = np.sort(np.append(xs, xs_around_E0))
         
         # 自适应设置 y 轴范围
