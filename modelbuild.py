@@ -108,9 +108,18 @@ class MultiColorBlackBody(Function1D, metaclass=FunctionMeta):
         
         # Pre-factor calculation
         # [ (Tmax/Tmin)^(m+1) - 1 ]
-        ratio_term = np.power(kT_max_ / kT_min_, m_ + 1) - 1.0
-        
-        prefactor = (const * (m_ + 1) * K_) / (ratio_term * np.power(kT_min_, 2))
+        # m = -1 时分子 (m+1) 与分母 ratio_term 同时为 0，直接相除得到 nan。
+        # m 的先验是 Uniform_prior(-2.5, 1)，采样器必然会走到这一点，因此这里
+        # 取解析极限：(m+1) / [ R^(m+1) - 1 ] -> 1 / ln(R)，R = kT_max/kT_min。
+        # 其余情形的表达式与取值保持不变。
+        ratio_ = kT_max_ / kT_min_
+        exponent_ = m_ + 1.0
+        if abs(exponent_) < 1e-8:
+            slope_term = 1.0 / np.log(ratio_)
+        else:
+            slope_term = exponent_ / (np.power(ratio_, exponent_) - 1.0)
+
+        prefactor = (const * K_ * slope_term) / np.power(kT_min_, 2)
 
         # Define the integrand for I(E)
         # x_int = E / kT

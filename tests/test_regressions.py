@@ -307,6 +307,31 @@ class LatWorkerRegressionTests(unittest.TestCase):
             "出图使用的 pivot 能量集合与拟合不一致",
         )
 
+    def test_multi_color_blackbody_is_finite_at_m_equals_minus_one(self) -> None:
+        """多色黑体在 m=-1 处必须给出有限值。
+
+        prefactor 的分子 (m+1) 与分母 (kT_max/kT_min)^(m+1)-1 在 m=-1 处同时
+        为 0，旧实现直接相除得到 nan。m 的先验是 Uniform_prior(-2.5, 1)，
+        采样点必然覆盖 m=-1，一旦命中该点整条似然就被污染。
+        """
+        import numpy as np
+
+        from grb_project.modelbuild import MultiColorBlackBody
+
+        mbb = MultiColorBlackBody()
+        energies = np.array([10.0, 100.0, 1000.0])
+        at_pole = mbb.evaluate(energies, 1e-6, 8.0, 100.0, -1.0)
+
+        self.assertTrue(
+            np.all(np.isfinite(at_pole)),
+            f"m=-1 处出现非有限值: {at_pole}",
+        )
+
+        # 解析极限必须与两侧邻域连续衔接，否则说明极限式写错了。
+        for delta in (1e-4, -1e-4):
+            nearby = mbb.evaluate(energies, 1e-6, 8.0, 100.0, -1.0 + delta)
+            np.testing.assert_allclose(at_pole, nearby, rtol=1e-3)
+
 
 if __name__ == "__main__":
     unittest.main()
