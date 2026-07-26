@@ -216,9 +216,12 @@ def _build_nai_rebin_axis(
 def _build_lat_rebin_axis(
     mid_points,
     bin_count: int,
-    burst_name: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """LAT display grid with fixed outer boundaries (30 MeV to 100 GeV)."""
+    """LAT display grid with fixed outer boundaries (30 MeV to 100 GeV).
+
+    外边界对所有暴一致，不随暴名变化；原先的 ``burst_name`` 形参从未被
+    读取，留着会让人误以为存在逐暴特例（测试里就是这么写的）。
+    """
     lower_boundary = 3e4
     upper_boundary = 1e8
     mid_points = np.asarray(mid_points, dtype=float)
@@ -1693,7 +1696,6 @@ def discrete_spectr(
             _build_lat_rebin_axis(
                 wavelength,
                 bin_count=style_config["lat_plot_bins"],
-                burst_name=bnname,
             )
         )
         # rebin y-axis

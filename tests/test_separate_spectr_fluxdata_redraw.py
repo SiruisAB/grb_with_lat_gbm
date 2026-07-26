@@ -252,33 +252,39 @@ def test_log_rebin_axis_limits_lat_to_five_points():
     assert np.all(err_high > 0)
 
 
-def test_lat_rebin_axis_uses_legacy_fixed_boundaries():
+def test_lat_rebin_axis_uses_fixed_outer_boundaries():
+    """LAT 展示网格的外边界固定为 30 MeV 到 100 GeV。"""
     from grb_project.separate_spectr import _build_lat_rebin_axis
 
     mid_points = np.geomspace(5.0e4, 8.0e7, 40)
-    centers, err_low, err_high = _build_lat_rebin_axis(
-        mid_points,
-        bin_count=5,
-        burst_name="bn231129799",
-    )
+    centers, err_low, err_high = _build_lat_rebin_axis(mid_points, bin_count=5)
 
     assert len(centers) == 5
-    assert centers[0] - 2.0 * err_low[0] == pytest.approx(0.9e5)
-    assert centers[-1] + 2.0 * err_high[-1] == pytest.approx(1.0e7)
+    assert centers[0] - 2.0 * err_low[0] == pytest.approx(3.0e4)
+    assert centers[-1] + 2.0 * err_high[-1] == pytest.approx(1.0e8)
     assert np.all(np.diff(centers) > 0)
 
 
-def test_lat_rebin_axis_uses_extended_upper_boundary_for_grb090510():
+def test_lat_rebin_axis_does_not_depend_on_the_burst():
+    """外边界不随暴变化：同样的输入必须给出同样的网格。
+
+    历史上这里曾按暴名设置不同的外边界（例如 GRB090510 用 40 MeV 上界），
+    现在的实现对所有暴一律用 30 MeV-100 GeV。这条用例把这一点钉死，
+    以免再出现"形参存在但从未生效"的状态。
+    """
     from grb_project.separate_spectr import _build_lat_rebin_axis
 
     mid_points = np.geomspace(1.0e5, 3.5e7, 30)
-    centers, _, err_high = _build_lat_rebin_axis(
-        mid_points,
-        bin_count=6,
-        burst_name="bn090510016",
-    )
+    centers, err_low, err_high = _build_lat_rebin_axis(mid_points, bin_count=6)
 
-    assert centers[-1] + 2.0 * err_high[-1] == pytest.approx(4.0e7)
+    assert centers[0] - 2.0 * err_low[0] == pytest.approx(3.0e4)
+    assert centers[-1] + 2.0 * err_high[-1] == pytest.approx(1.0e8)
+
+    # 网格只由 mid_points 与 bin_count 决定，不接受任何逐暴参数。
+    import inspect
+
+    signature = inspect.signature(_build_lat_rebin_axis)
+    assert list(signature.parameters) == ["mid_points", "bin_count"]
 
 
 def test_lat_display_uncertainty_is_capped_but_raw_values_are_unchanged():
@@ -644,11 +650,18 @@ def test_redraw_entrypoint_uses_default_bandbb_fluxdata_path(monkeypatch, tmp_pa
 
     called = {}
 
-    def fake_redraw_all(fluxdata_dir, output_dir, bnname, fit_json_path=None):
+    def fake_redraw_all(
+        fluxdata_dir,
+        output_dir,
+        bnname,
+        fit_json_path=None,
+        show_lat_upper_limits=True,
+    ):
         called["fluxdata_dir"] = fluxdata_dir
         called["output_dir"] = output_dir
         called["bnname"] = bnname
         called["fit_json_path"] = fit_json_path
+        called["show_lat_upper_limits"] = show_lat_upper_limits
         return {"single_plots": [], "overview": []}
 
     monkeypatch.setattr(separate_spectr, "redraw_all_fluxdata_spectra", fake_redraw_all)
@@ -659,6 +672,7 @@ def test_redraw_entrypoint_uses_default_bandbb_fluxdata_path(monkeypatch, tmp_pa
     assert called["fluxdata_dir"] == tmp_path / "GRB231129C" / "band+bb" / "fluxdata"
     assert called["output_dir"] == tmp_path / "GRB231129C" / "band+bb" / "fluxdata"
     assert called["fit_json_path"] is None
+    assert called["show_lat_upper_limits"] is True
 
 
 def test_cli_main_creates_log_file_and_outputs(tmp_path: Path):
