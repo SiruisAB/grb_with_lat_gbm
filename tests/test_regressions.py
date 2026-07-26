@@ -358,6 +358,37 @@ class LatWorkerRegressionTests(unittest.TestCase):
             (-5.0, 14.0),
         )
 
+    def test_special_burst_segment_names_are_unique_per_burst(self) -> None:
+        """同一个暴内的分段名必须唯一。
+
+        分段名会直接当作中间产物的文件名前缀
+        （lat_extended_three_ml.py:310 的 outfile=f"{grb_name}_{seg['tag']}"），
+        重名会让后一段静默覆盖前一段的 LAT 事件与响应文件。
+        GRB240118A 曾把 63.0-69.2 和 69.2-79.0 两段都命名为 seg4。
+        """
+        import collections
+
+        import yaml
+
+        from grb_project.lightcurves import SPECIAL_BURSTS_YAML
+
+        with open(SPECIAL_BURSTS_YAML, encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle)
+
+        bursts = payload["special_bursts"]
+        self.assertTrue(bursts, "special_bursts.yaml 中没有任何暴")
+
+        for burst in bursts:
+            names = [seg.get("name") for seg in (burst.get("time_segments") or [])]
+            duplicated = sorted(
+                name for name, count in collections.Counter(names).items() if count > 1
+            )
+            self.assertEqual(
+                duplicated,
+                [],
+                f"{burst.get('name')} 存在重名分段 {duplicated}: {names}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

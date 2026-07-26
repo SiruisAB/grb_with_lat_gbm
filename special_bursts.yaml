@@ -90,7 +90,7 @@ special_bursts:
   - name: seg4
     start: 63.0
     stop: 69.2
-  - name: seg4
+  - name: seg4b
     start: 69.2
     stop: 79.0
   - name: seg5
