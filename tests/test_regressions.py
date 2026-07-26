@@ -926,5 +926,84 @@ class ReviewFixRegressionTests(unittest.TestCase):
 
 
 
+    def test_plot_models_accept_every_value_the_fit_could_produce(self) -> None:
+        """拟合允许取到的参数值，出图时必须也赋得进去。
+
+        astromodels 会拒绝超出硬边界的赋值。裸构造出来的边界往往比 modelbuild
+        放宽后的窄（Band 的 xp 下限 10 keV 对 8 keV、mBB 的 kT_max 上限 500 keV
+        对 40 MeV / 100 GeV），拟合结果一旦落在放宽的那一段，出图就会在赋值处
+        直接抛出来，再被 bayesian_fit 的 except 吞成一行警告。
+
+        两种分析模式都要过：能量类参数的上限随模式变化，只在 gbm 下试会漏掉
+        comp 的 xc 与 mBB 的 kT_min/kT_max 在 gbm+lat 下的那一段。
+        """
+        import ast
+        import math
+
+        from grb_project import separate_spectr
+        from grb_project.modelbuild import build_model
+        from grb_project.web_app import SUPPORTED_MODELS
+
+        branches = self._discrete_spectr_branches()
+
+        for analysis_mode in ("gbm", "gbm+lat"):
+            for model_str in SUPPORTED_MODELS:
+                reference = build_model(model_str, analysis_mode=analysis_mode)
+                parameters = list(reference.free_parameters.values())
+                defaults = [float(par.value) for par in parameters]
+
+                for position, parameter in enumerate(parameters):
+                    for edge in ("min_value", "max_value"):
+                        bound = getattr(parameter, edge, None)
+                        if bound is None or not math.isfinite(float(bound)):
+                            continue
+
+                        values = list(defaults)
+                        values[position] = float(bound)
+                        namespace = dict(vars(separate_spectr))
+                        namespace.update(
+                            model_str=model_str,
+                            parameter_values=values,
+                            analysis_mode=analysis_mode,
+                        )
+                        with self.subTest(
+                            mode=analysis_mode, model=model_str, index=position, edge=edge
+                        ):
+                            exec(  # noqa: S102 - 就是要执行源码里的那一段
+                                compile(
+                                    ast.Module(body=[branches[model_str]], type_ignores=[]),
+                                    "<branch>",
+                                    "exec",
+                                ),
+                                namespace,
+                            )
+
+    def test_widening_parameter_bounds_never_tightens_them(self) -> None:
+        """_widen_parameter_bounds 只放宽、不收紧。
+
+        既有分支里那些显式写死的边界（例如 comp 的 xc 下限 1e-99、band+bb 的
+        xp 上限 1e8）都要原样留着，否则就等于悄悄改了那些分支原来的行为。
+        """
+        from grb_project.separate_spectr import _widen_parameter_bounds
+
+        class _Parameter:
+            def __init__(self, lower, upper):
+                self.min_value = lower
+                self.max_value = upper
+
+        narrower = _Parameter(1e-99, 1e8)
+        _widen_parameter_bounds(narrower, 8.0, 4e4)
+        self.assertEqual((narrower.min_value, narrower.max_value), (1e-99, 1e8))
+
+        wider = _Parameter(10.0, 500.0)
+        _widen_parameter_bounds(wider, 8.0, 4e4)
+        self.assertEqual((wider.min_value, wider.max_value), (8.0, 4e4))
+
+        # 没有边界的一侧不去凭空造一个出来（Band 的 xp 上限本来就是无穷）。
+        unbounded = _Parameter(10.0, None)
+        _widen_parameter_bounds(unbounded, 8.0, 4e4)
+        self.assertEqual((unbounded.min_value, unbounded.max_value), (8.0, None))
+
+
 if __name__ == "__main__":
     unittest.main()

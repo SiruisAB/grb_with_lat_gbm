@@ -1226,6 +1226,27 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
+def _widen_parameter_bounds(parameter, lower, upper) -> None:
+    """把一个参数的硬边界放宽到至少覆盖 [lower, upper]，只放宽、不收紧。
+
+    出图只拿模型求值，硬边界本身没有意义，但 astromodels 会拒绝超出边界的
+    赋值。裸构造出来的边界往往比 modelbuild 拟合时用的窄（Band 的 xp 下限
+    10 keV 对 8 keV、mBB 的 kT_max 上限 500 keV 对 40 MeV / 100 GeV 等），
+    拟合结果一旦落在放宽的那一段，赋值就会直接抛出来，再被 bayesian_fit 的
+    except 吞成一行"警告: 绘制分离谱失败"。
+
+    只放宽是为了不改变任何原本就能正常出图的情况：既有分支里那些显式写死的
+    边界（例如 comp 的 xc 下限 1e-99）都原样保留。
+    """
+    current_lower = getattr(parameter, "min_value", None)
+    if current_lower is not None and lower is not None and float(lower) < float(current_lower):
+        parameter.min_value = float(lower)
+
+    current_upper = getattr(parameter, "max_value", None)
+    if current_upper is not None and upper is not None and float(upper) > float(current_upper):
+        parameter.max_value = float(upper)
+
+
 def discrete_spectr(
     fluence_plugins,
     lat,
@@ -1250,6 +1271,7 @@ def discrete_spectr(
         model1 = Powerlaw(piv=1E2)
         # model1.K.min_value, model1.K.max_value = 1e-8, 1e3
         # model1.index.min_value, model1.index.max_value = -5.0, 0.0
+        _widen_parameter_bounds(model1.K, 1e-8, 1e4)
         model1.K ,model1.index = parameter_values[:2]
         modelTotal=model1
         model_str1='PL'
@@ -1265,6 +1287,8 @@ def discrete_spectr(
         model1.K.min_value, model1.K.max_value = 1e-7, 1e6
         model1.index.min_value, model1.index.max_value = -10.0, 10.0
         model1.xc.min_value, model1.xc.max_value = 1e-99, 1e7
+        _widen_parameter_bounds(model1.K, 1e-12, 1e6)
+        _widen_parameter_bounds(model1.xc, *_energy_bounds_for_mode(analysis_mode))
         model1.K ,model1.index,model1.xc = parameter_values[:3]
         modelTotal=model1
         model_str1='comp'
@@ -1274,6 +1298,7 @@ def discrete_spectr(
         # model1.alpha.min_value = -2.0    # 改硬边界
         # model1.alpha.max_value =  5.0
         # model1.xp.min_value,model1.xp.max_value = 1.0, 1e8
+        _widen_parameter_bounds(model1.xp, *_energy_bounds_for_mode(analysis_mode))
         model1.K ,model1.alpha,model1.xp ,model1.beta = parameter_values[:4]
         modelTotal=model1
         model_str1='Band'
@@ -1286,9 +1311,9 @@ def discrete_spectr(
         # 裸构造出来的硬边界比拟合时窄（alpha 上限 2.0、beta 下限 -5、break_energy
         # 下限 10 keV），落在放宽区间里的拟合结果直接赋值会被 astromodels 拒掉，
         # 所以先把边界对齐 modelbuild 的设置。
-        model1.alpha.min_value, model1.alpha.max_value = -2.0, 5.0
-        model1.beta.min_value, model1.beta.max_value = -10.0, -1.5
-        model1.break_energy.min_value, model1.break_energy.max_value = _energy_bounds_for_mode(analysis_mode)
+        _widen_parameter_bounds(model1.alpha, -2.0, 5.0)
+        _widen_parameter_bounds(model1.beta, -10.0, -1.5)
+        _widen_parameter_bounds(model1.break_energy, *_energy_bounds_for_mode(analysis_mode))
         model1.K, model1.alpha, model1.break_energy, model1.beta = parameter_values[:4]
         modelTotal = model1
         model_str1 = 'SBPL'
@@ -1318,6 +1343,8 @@ def discrete_spectr(
     if model_str == 'mbb':
         # MBB: K, kT_min, kT_max, m（与 modelbuild.py 一致）
         model1 = MultiColorBlackBody()
+        _widen_parameter_bounds(model1.kT_min, *_energy_bounds_for_mode(analysis_mode))
+        _widen_parameter_bounds(model1.kT_max, *_energy_bounds_for_mode(analysis_mode))
         model1.K, model1.kT_min, model1.kT_max, model1.m = parameter_values[:4]
         modelTotal = model1
         model_str1 = 'mBB'
@@ -1325,6 +1352,8 @@ def discrete_spectr(
     if model_str == 'mbb+pl':
         # mBB + PL: K, kT_min, kT_max, m, K_pl, index（与 modelbuild.py 一致）
         model1 = MultiColorBlackBody()
+        _widen_parameter_bounds(model1.kT_min, *_energy_bounds_for_mode(analysis_mode))
+        _widen_parameter_bounds(model1.kT_max, *_energy_bounds_for_mode(analysis_mode))
         model1.K, model1.kT_min, model1.kT_max, model1.m = parameter_values[:4]
         model2 = Powerlaw(piv=1E2)
         model2.K, model2.index = parameter_values[4:6]
@@ -1336,19 +1365,24 @@ def discrete_spectr(
         # Band + mBB: K, alpha, xp, beta, K_mbb, kT_min, kT_max, m（与 modelbuild.py 一致）
         energy_bounds = _energy_bounds_for_mode(analysis_mode)
         model1 = Band(piv=1E2)
-        # 同 SBPL：xp / kT_min / kT_max 的默认硬边界比拟合时窄，先对齐再赋值。
-        model1.xp.min_value, model1.xp.max_value = energy_bounds
+        # 同 SBPL：xp / kT_min / kT_max 的默认硬边界比拟合时窄，先放宽再赋值。
+        _widen_parameter_bounds(model1.xp, *energy_bounds)
         model1.K, model1.alpha, model1.xp, model1.beta = parameter_values[:4]
         model2 = MultiColorBlackBody()
-        model2.kT_min.min_value, model2.kT_min.max_value = energy_bounds
-        model2.kT_max.min_value, model2.kT_max.max_value = energy_bounds
+        _widen_parameter_bounds(model2.kT_min, *energy_bounds)
+        _widen_parameter_bounds(model2.kT_max, *energy_bounds)
         model2.K, model2.kT_min, model2.kT_max, model2.m = parameter_values[4:8]
         modelTotal = model1 + model2
         model_str1 = 'Band'
         model_str2 = 'mBB'
 
     if model_str == 'band+bb':
-        model1 = Band(K=parameter_values[0],alpha=parameter_values[1],xp=parameter_values[2],beta=parameter_values[3],piv=1E2)          # 先用默认值构造出来
+        # 原先这四个参数是直接从构造函数传进去的，赋值发生在下面那行放宽之前，
+        # xp 落在 8-10 keV 之间时会在构造处就抛出来。改成先构造、放宽、再赋值，
+        # 赋完的参数值与原来完全相同。
+        model1 = Band(piv=1E2)          # 先用默认值构造出来
+        _widen_parameter_bounds(model1.xp, *_energy_bounds_for_mode(analysis_mode))
+        model1.K, model1.alpha, model1.xp, model1.beta = parameter_values[:4]
         # model1.alpha.min_value = -5.0    # 改硬边界
         # model1.alpha.max_value =  3.0
         model1.xp.min_value,model1.xp.max_value = 1.0, 1e8
@@ -1367,6 +1401,7 @@ def discrete_spectr(
         model1.alpha.min_value = -2.0    # 改硬边界
         model1.alpha.max_value =  5.0
         # model1.xp.min_value,model1.xp.max_value = 1.0, 1e8
+        _widen_parameter_bounds(model1.xp, *_energy_bounds_for_mode(analysis_mode))
         model1.K , model1.alpha , model1.xp , model1.beta  = parameter_values[:4]
         model2=Powerlaw(piv=1E2)
         # model2.K.min_value, model2.K.max_value = 1e-7, 1e6
@@ -1399,6 +1434,7 @@ def discrete_spectr(
 
     if model_str == 'band+bb+pl':
         model1 = Band(piv=1E2)
+        _widen_parameter_bounds(model1.xp, *_energy_bounds_for_mode(analysis_mode))
         model1.K , model1.alpha , model1.xp , model1.beta  = parameter_values[:4]
         model2 = Blackbody()
         model2.K ,model2.kT = parameter_values[4:6]
@@ -1413,6 +1449,7 @@ def discrete_spectr(
     
     if model_str == 'band+gauss':
         model1 = Band(piv=1E2)
+        _widen_parameter_bounds(model1.xp, *_energy_bounds_for_mode(analysis_mode))
         model1.K , model1.alpha , model1.xp , model1.beta  = parameter_values[:4]
         model2 = Gaussian()
         model2.F, model2.mu , model2.sigma = parameter_values[4:7]
