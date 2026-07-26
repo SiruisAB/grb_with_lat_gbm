@@ -462,6 +462,63 @@ class ReviewFixRegressionTests(unittest.TestCase):
             f"join 的超时值不合法: {created[0].join_timeouts}",
         )
 
+    def test_web_keeps_every_background_window(self) -> None:
+        """网页光变分支不能丢掉第三段及之后的本底窗。
+
+        special_bursts.yaml 里 bn250313607 与 bn220921462 都用三段本底；
+        谱拟合那条路径原样透传整串，网页却只取前两段，导致图上的本底与
+        实际拟合所用的本底不一致。
+        """
+        from grb_project.web_app import _parse_background_intervals
+
+        default = ("-20--5", "100-150")
+
+        # 三段必须原样保留。
+        self.assertEqual(
+            _parse_background_intervals("-24--5,100-150,350-400", default),
+            ("-24--5", "100-150", "350-400"),
+        )
+
+        # 两段及以下的既有行为逐字不变。
+        self.assertEqual(
+            _parse_background_intervals("-24--5,100-150", default),
+            ("-24--5", "100-150"),
+        )
+        self.assertEqual(
+            _parse_background_intervals("-24--5", default),
+            ("-24--5", "100-150"),
+        )
+        self.assertEqual(_parse_background_intervals("", default), default)
+
+    def test_yaml_background_windows_survive_the_web_lightcurve_path(self) -> None:
+        """special_bursts.yaml 中的每一段本底都要能走完网页光变这条路。"""
+        import yaml
+
+        from grb_project.lightcurves import (
+            SPECIAL_BURSTS_YAML,
+            parse_background_interval_tuple,
+        )
+        from grb_project.web_app import _parse_background_intervals
+
+        with open(SPECIAL_BURSTS_YAML, encoding="utf-8") as handle:
+            bursts = yaml.safe_load(handle)["special_bursts"]
+
+        checked = 0
+        for burst in bursts:
+            raw = burst.get("background_interval")
+            if not raw:
+                continue
+            expected = parse_background_interval_tuple(str(raw))
+            parsed = _parse_background_intervals(str(raw), ("-20--5", "100-150"))
+            self.assertEqual(
+                parse_background_interval_tuple(",".join(parsed)),
+                expected,
+                f"{burst.get('name')} 的本底窗在网页分支被改动: {raw}",
+            )
+            checked += 1
+
+        self.assertGreater(checked, 0, "special_bursts.yaml 中没有本底窗可供检查")
+
 
 if __name__ == "__main__":
     unittest.main()

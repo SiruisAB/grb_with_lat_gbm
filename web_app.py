@@ -236,10 +236,16 @@ def _parse_band_pairs(text: str, default: Sequence[tuple[float, float]]) -> list
     return items or list(default)
 
 
-def _parse_background_intervals(text: str, default: Sequence[str]) -> tuple[str, str]:
+def _parse_background_intervals(text: str, default: Sequence[str]) -> tuple[str, ...]:
+    """把逗号分隔的本底窗字符串拆成若干段，全部保留。
+
+    special_bursts.yaml 中已有暴使用三段本底（例如
+    ``-24--5,100-150,350-400``）。谱拟合那条路径原样透传整串，只有网页
+    的光变分支会截断，截断后画出来的本底与实际拟合所用的本底不是同一个。
+    """
     cleaned = [item.strip() for item in str(text).split(",") if item.strip()]
     if len(cleaned) >= 2:
-        return cleaned[0], cleaned[1]
+        return tuple(cleaned)
     if len(cleaned) == 1:
         return cleaned[0], default[1]
     return (default[0], default[1])
