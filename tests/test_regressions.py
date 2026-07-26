@@ -332,6 +332,32 @@ class LatWorkerRegressionTests(unittest.TestCase):
             nearby = mbb.evaluate(energies, 1e-6, 8.0, 100.0, -1.0 + delta)
             np.testing.assert_allclose(at_pole, nearby, rtol=1e-3)
 
+    def test_display_window_honours_pad_before_seconds(self) -> None:
+        """光变展示窗口的前置留白必须真正使用 pad_before_s。
+
+        原实现把前置留白写死成 1.0，形参 pad_before_s 从未参与计算，
+        web 界面上的 display_window_pad_before_s 输入框调了也没有任何效果。
+        """
+        from grb_project.lightcurves import resolve_lightcurve_display_window
+
+        # 默认值 1.0 必须与改动前的硬编码行为逐字一致。
+        self.assertEqual(
+            resolve_lightcurve_display_window("0.5-10.2", pad_after_s=0.0),
+            (-1.0, 11.0),
+        )
+
+        # 非默认值必须生效：前置留白 5 秒，起点应为 floor(0.5) - 5 = -5.0。
+        self.assertEqual(
+            resolve_lightcurve_display_window("0.5-10.2", 5.0, 0.0),
+            (-5.0, 11.0),
+        )
+
+        # 后置留白同样按传入值生效，且两者互不影响。
+        self.assertEqual(
+            resolve_lightcurve_display_window("0.5-10.2", 5.0, 3.0),
+            (-5.0, 14.0),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

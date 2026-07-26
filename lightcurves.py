@@ -248,8 +248,9 @@ def resolve_lightcurve_display_window(
     if parsed is None:
         return None
     start, stop = parsed
+    before = float(pad_before_s if pad_before_s is not None else 0.0)
     after = float(pad_after_s if pad_after_s is not None else 0.0)
-    start = float(np.floor(start) - 1.0)
+    start = float(np.floor(start) - before)
     stop = float(np.ceil(stop) + after)
     if not np.isfinite(start) or not np.isfinite(stop) or stop <= start:
         return None
