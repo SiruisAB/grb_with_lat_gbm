@@ -165,21 +165,18 @@ def _build_lat_analysis_segments(
     return segments
 
 
-def _build_background_interval_string(row: pd.Series, bnname: str) -> str:
+def _build_background_interval_string(row: pd.Series) -> str:
+    """按目录表的四个本底端点拼出本底窗字符串。
+
+    这里原先还按 bnname 硬编码了 bn221023862 / bn250313607 / bn220921462
+    三个暴的特例本底窗。这三份配置已全部迁入 special_bursts.yaml，逐暴特例
+    只保留 YAML 一个来源；本函数只负责目录表的通用取值，因此不再需要
+    bnname 形参。
+    """
     t2, t3 = row["back_interval_low_start"], row["back_interval_low_stop"]
     t4, t5 = row["back_interval_high_start"], row["back_interval_high_stop"]
 
-    if bnname == "bn221023862":
-        t2, t3 = float(-130), float(-10)
-        t4, t5 = float(100), float(200)
-
-    background_interval = f"{t2}-{t3},{t4}-{t5}"
-    if bnname == "bn250313607":
-        background_interval = "-24--5,100-150,350-400"
-    if bnname == "bn220921462":
-        background_interval = "-23.960--2.080,75-100,140-160"
-
-    return background_interval
+    return f"{t2}-{t3},{t4}-{t5}"
 
 
 def _build_lat_gcn_t95_segments(

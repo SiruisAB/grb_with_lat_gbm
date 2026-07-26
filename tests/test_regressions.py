@@ -69,7 +69,6 @@ class ProjectRegressionTests(unittest.TestCase):
                 lightcurve_active_interval="3-4",
                 lightcurve_background_intervals=("-20--10", "100-120"),
             ),
-            bnname="bn123",
         )
 
         self.assertEqual(active, "3-4")
@@ -555,46 +554,92 @@ class ReviewFixRegressionTests(unittest.TestCase):
         degenerate = np.logspace(5.0, np.log10(1e5), 100)
         self.assertEqual(np.unique(degenerate).size, 1)
 
-    def test_hardcoded_backgrounds_agree_with_special_bursts_yaml(self) -> None:
-        """同一个暴的本底窗不能在两处给出不同答案。
+    def test_special_burst_backgrounds_live_only_in_yaml(self) -> None:
+        """逐暴的特例本底窗只能有 special_bursts.yaml 一个来源。
 
-        gbm_core._build_background_interval_string 里按 bnname 硬编码了
-        若干暴的本底窗，special_bursts.yaml 里也有一份。凡是两处都出现的
-        暴，两份必须一致，否则改了一处忘了另一处就会静默用错本底。
+        gbm_core._build_background_interval_string 里曾按 bnname 硬编码过三个
+        暴的本底窗，与 YAML 各存一份；改了一处忘了另一处会静默用错本底。三份
+        配置已迁入 YAML，这里同时钉住两件事：函数里不能再出现按 bnname 的
+        特例分支，以及迁移进 YAML 的取值必须与迁移前逐字一致。
         """
+        import ast
+        import inspect
+
         import yaml
 
         from grb_project.gbm_core import _build_background_interval_string
         from grb_project.lightcurves import SPECIAL_BURSTS_YAML
 
-        # 一行不含任何特例的目录记录，用来识别"函数走了硬编码分支"。
-        row = pd.Series(
-            {
-                "back_interval_low_start": -20.0,
-                "back_interval_low_stop": -5.0,
-                "back_interval_high_start": 100.0,
-                "back_interval_high_stop": 150.0,
-            }
+        # 1) 函数只吃目录表那一行，不再按暴名分支。
+        self.assertEqual(
+            list(inspect.signature(_build_background_interval_string).parameters),
+            ["row"],
         )
-        generic = _build_background_interval_string(row, "bn000000000")
+        tree = ast.parse(inspect.getsource(_build_background_interval_string))
+        literals = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("bn")
+        ]
+        self.assertEqual(literals, [], "本底窗函数里又出现了按 bnname 的硬编码特例")
+
+        # 2) 迁移前这三个暴实际拿到的字符串，逐字钉死在 YAML 里。
+        migrated = {
+            "bn221023862": "-130.0--10.0,100.0-200.0",
+            "bn250313607": "-24--5,100-150,350-400",
+            "bn220921462": "-23.960--2.080,75-100,140-160",
+        }
+        with open(SPECIAL_BURSTS_YAML, encoding="utf-8") as handle:
+            bursts = yaml.safe_load(handle)["special_bursts"]
+        by_bnname = {str(b.get("bnname")): b for b in bursts if isinstance(b, dict)}
+
+        for bnname, expected in migrated.items():
+            self.assertIn(bnname, by_bnname, f"{bnname} 的特例本底窗没有留在 YAML 里")
+            self.assertEqual(
+                str(by_bnname[bnname].get("background_interval")),
+                expected,
+                f"{bnname} 的本底窗与迁移前不一致",
+            )
+
+    def test_migrated_special_bursts_only_carry_a_background_window(self) -> None:
+        """迁移进来的两个暴不能顺手带上时间分段或活动区间。
+
+        它们原先只有本底窗一项特例配置；YAML 条目里一旦多出 time_segments 或
+        active_interval，project 就会改走特殊分段分支，分析结果随之变化。
+        """
+        import yaml
+
+        from grb_project.lightcurves import SPECIAL_BURSTS_YAML
 
         with open(SPECIAL_BURSTS_YAML, encoding="utf-8") as handle:
             bursts = yaml.safe_load(handle)["special_bursts"]
+        by_bnname = {str(b.get("bnname")): b for b in bursts if isinstance(b, dict)}
 
-        for burst in bursts:
-            bnname = str(burst.get("bnname") or "")
-            yaml_background = burst.get("background_interval")
-            if not bnname or not yaml_background:
-                continue
-            produced = _build_background_interval_string(row, bnname)
-            if produced == generic:
-                # gbm_core 对这个暴没有硬编码特例，无从比较。
-                continue
-            self.assertEqual(
-                produced,
-                str(yaml_background),
-                f"{bnname} 的本底窗在 gbm_core 与 special_bursts.yaml 中不一致",
-            )
+        for bnname in ("bn221023862", "bn220921462"):
+            burst = by_bnname[bnname]
+            self.assertFalse(burst.get("time_segments"), f"{bnname} 多出了 time_segments")
+            self.assertFalse(burst.get("active_interval"), f"{bnname} 多出了 active_interval")
+
+    def test_migrated_special_bursts_keep_their_result_directory_name(self) -> None:
+        """YAML 里的 name 必须等于目录表 gcn_name 去掉空格后的结果。
+
+        project 命中特例后会用 special_cfg["name"] 覆盖 grb_name，而 grb_name
+        决定结果目录名。两个新条目若写错 name，输出目录就会换地方。
+        """
+        import yaml
+
+        from grb_project.lightcurves import SPECIAL_BURSTS_YAML
+
+        with open(SPECIAL_BURSTS_YAML, encoding="utf-8") as handle:
+            bursts = yaml.safe_load(handle)["special_bursts"]
+        by_bnname = {str(b.get("bnname")): b for b in bursts if isinstance(b, dict)}
+
+        # 取自 fermilat-grb.xls 的 GCN 表，即 grb_name 的默认来源。
+        gcn_names = {"bn221023862": "GRB 221023A", "bn220921462": "GRB 220921A"}
+        for bnname, gcn_name in gcn_names.items():
+            self.assertEqual(str(by_bnname[bnname].get("name")), gcn_name.replace(" ", ""))
 
 
 if __name__ == "__main__":

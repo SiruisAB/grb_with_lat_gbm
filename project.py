@@ -341,7 +341,6 @@ def _resolve_runtime_intervals(
     special_cfg: dict,
     project_config: Optional[GRBProjectConfig],
     run_overrides: Optional[GRBRunOverrides],
-    bnname: str,
 ) -> tuple[str, str]:
     from .gbm_core import _build_background_interval_string, resolve_active_interval_from_special_and_catalog
 
@@ -352,7 +351,7 @@ def _resolve_runtime_intervals(
     )
     background_interval = _as_text(
         special_cfg.get("background_interval"),
-        _build_background_interval_string(catalog_row, bnname)
+        _build_background_interval_string(catalog_row)
         if {
             "back_interval_low_start",
             "back_interval_low_stop",
@@ -938,7 +937,6 @@ def run_single_analysis(
             special_cfg=special_cfg,
             project_config=project_config,
             run_overrides=run_overrides,
-            bnname=bnname,
         )
         raw_segments = special_cfg.get("time_segments")
         if raw_segments:

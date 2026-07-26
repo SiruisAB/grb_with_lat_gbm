@@ -96,3 +96,11 @@ special_bursts:
   - name: seg5
     start: 79.0
     stop: 99.0
+- name: GRB221023A
+  bnname: bn221023862
+  description: 特殊背景窗（原先硬编码在 gbm_core 中）
+  background_interval: -130.0--10.0,100.0-200.0
+- name: GRB220921A
+  bnname: bn220921462
+  description: 特殊背景窗（原先硬编码在 gbm_core 中）
+  background_interval: -23.960--2.080,75-100,140-160
