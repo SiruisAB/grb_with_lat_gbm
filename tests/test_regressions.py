@@ -279,5 +279,34 @@ class LatWorkerRegressionTests(unittest.TestCase):
         proc.join.assert_called()
 
 
+    def test_fit_and_plot_models_use_the_same_pivot_energy(self) -> None:
+        """拟合与出图必须共用同一 pivot 能量。
+
+        modelbuild.build_model() 拟合出的归一化 K 是相对某个 piv 定义的；
+        separate_spectr.discrete_spectr() 若用不同的 piv 重建模型，谱线和
+        反卷积出的数据点会整体偏离 (piv_plot / piv_fit) ** (-index) 倍，
+        而图上模型与数据仍然吻合，肉眼无法察觉。
+        """
+        import inspect
+        import re
+
+        from grb_project import modelbuild
+        from grb_project.separate_spectr import discrete_spectr
+
+        pattern = re.compile(r"piv\s*=\s*([0-9]+(?:\.[0-9]*)?[Ee][+-]?[0-9]+)")
+        fit_pivots = {float(v) for v in pattern.findall(inspect.getsource(modelbuild))}
+        plot_pivots = {
+            float(v) for v in pattern.findall(inspect.getsource(discrete_spectr))
+        }
+
+        self.assertTrue(fit_pivots, "modelbuild 中未找到 piv= 字面量")
+        self.assertTrue(plot_pivots, "discrete_spectr 中未找到 piv= 字面量")
+        self.assertEqual(
+            plot_pivots,
+            fit_pivots,
+            "出图使用的 pivot 能量集合与拟合不一致",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

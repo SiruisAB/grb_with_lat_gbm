@@ -1255,7 +1255,7 @@ def discrete_spectr(
         model_str1= 'BB'
 
     if model_str == 'comp':
-        model1 = Cutoff_powerlaw(piv=1E5)
+        model1 = Cutoff_powerlaw(piv=1E2)
         model1.K.min_value, model1.K.max_value = 1e-7, 1e6
         model1.index.min_value, model1.index.max_value = -10.0, 10.0
         model1.xc.min_value, model1.xc.max_value = 1e-99, 1e7
