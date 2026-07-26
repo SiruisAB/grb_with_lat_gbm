@@ -642,5 +642,125 @@ class ReviewFixRegressionTests(unittest.TestCase):
             self.assertEqual(str(by_bnname[bnname].get("name")), gcn_name.replace(" ", ""))
 
 
+    def test_li_ma_significance_reduces_correctly_when_alpha_is_one(self) -> None:
+        """alpha=1 时 Li&Ma 退化成一个可以独立写出的闭式，用它交叉核对。"""
+        import math
+
+        from grb_project.lat_extended_three_ml import _li_ma_significance
+
+        for n_on, n_off in ((30, 10), (100, 60), (7, 3)):
+            total = n_on + n_off
+            expected = math.sqrt(
+                2.0
+                * (
+                    n_on * math.log(2.0 * n_on / total)
+                    + n_off * math.log(2.0 * n_off / total)
+                )
+            )
+            self.assertAlmostEqual(_li_ma_significance(n_on, n_off, 1.0), expected, places=9)
+
+        # 没有超出就没有显著度。
+        self.assertAlmostEqual(_li_ma_significance(50, 50, 1.0), 0.0, places=9)
+        # 亏损记为负，排序时才不会和"刚好为零"混在一起。
+        self.assertLess(_li_ma_significance(10, 50, 1.0), 0.0)
+        # 本底不变时超出越多越显著。
+        self.assertLess(
+            _li_ma_significance(60, 100, 0.2),
+            _li_ma_significance(90, 100, 0.2),
+        )
+        # 退化输入不能抛异常。
+        self.assertEqual(_li_ma_significance(0, 0, 0.5), 0.0)
+        self.assertEqual(_li_ma_significance(5, 5, 0.0), 0.0)
+
+    def test_on_off_significance_counts_events_by_angular_separation(self) -> None:
+        """on/off 计数按到源的角距划分，alpha 是立体角之比。"""
+        import math
+        import tempfile
+
+        import numpy as np
+        from astropy.io import fits
+
+        from grb_project.lat_extended_three_ml import _on_off_significance
+
+        ra0, dec0 = 100.0, 0.0
+        # 6 个事例落在源上（角距 0），4 个落在 5 度外。
+        ra = np.array([ra0] * 6 + [ra0 + 5.0] * 4, dtype=float)
+        dec = np.array([dec0] * 10, dtype=float)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "events.fits")
+            hdu = fits.BinTableHDU.from_columns(
+                [
+                    fits.Column(name="RA", format="E", array=ra),
+                    fits.Column(name="DEC", format="E", array=dec),
+                ],
+                name="EVENTS",
+            )
+            fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path)
+
+            result = _on_off_significance(path, ra0, dec0, roi=12.0, on_radius=1.0)
+
+        self.assertEqual(result["n_on"], 6)
+        self.assertEqual(result["n_off"], 4)
+
+        omega_on = 1.0 - math.cos(math.radians(1.0))
+        omega_off = math.cos(math.radians(1.0)) - math.cos(math.radians(12.0))
+        self.assertAlmostEqual(result["alpha"], round(omega_on / omega_off, 6), places=6)
+        self.assertGreater(result["sigma"], 0.0)
+
+    def test_on_off_significance_gives_up_without_an_off_annulus(self) -> None:
+        """roi 不大于 on 区半径时圆环退化，本底无从估计，只能返回空值。
+
+        扫描范围里的 roi=1 正好落在这一档，不能让它把整个扫描弄挂。
+        """
+        from grb_project.lat_extended_three_ml import _on_off_significance
+
+        result = _on_off_significance("/does/not/exist.fits", 10.0, 20.0, roi=1.0, on_radius=1.0)
+        self.assertEqual(set(result), {"n_on", "n_off", "alpha", "excess", "sigma"})
+        self.assertTrue(all(value is None for value in result.values()))
+
+        # 文件读不出来时同样只能返回空值，不能抛出去。
+        broken = _on_off_significance("/does/not/exist.fits", 10.0, 20.0, roi=12.0)
+        self.assertIsNone(broken["sigma"])
+
+    def test_roi_zmax_selection_still_goes_by_event_count(self) -> None:
+        """显著度只是记录用的对照列，判据必须仍然是 nEvents 最大。
+
+        构造一组数据：事例数最大的是 (roi=3, zmax=100)，显著度最大的是
+        (roi=9, zmax=104)。返回值必须是前者。
+        """
+        from grb_project import lat_extended_three_ml as module
+
+        class FakeDataset:
+            ra = 10.0
+            dec = 20.0
+            filt_file = "/tmp/does-not-matter.fits"
+
+            def __init__(self) -> None:
+                self.nEvents = 0
+                self.calls: list[tuple[int, int]] = []
+
+            def extract_events(self, roi, zmax, irf, thetamax, strategy="time"):
+                self.calls.append((roi, zmax))
+                self.nEvents = 500 if (roi, zmax) == (3, 100) else roi + zmax
+
+        def fake_significance(filt_file, ra, dec, roi, on_radius=1.0):
+            sigma = 99.0 if roi == 9 else float(roi)
+            return {"n_on": 1, "n_off": 1, "alpha": 0.1, "excess": 0.9, "sigma": sigma}
+
+        dataset = FakeDataset()
+        with mock.patch.object(module, "_on_off_significance", fake_significance):
+            roi, zmax, rows = module._scan_best_roi_zmax(dataset, "p8_transient020e", 180.0)
+
+        self.assertEqual((roi, zmax), (3, 100))
+        self.assertEqual(len(dataset.calls), 72)
+        self.assertEqual(len(rows), 72)
+        # 对照列确实落进了每一行。
+        self.assertTrue(all("sigma" in row for row in rows))
+        best_by_sigma = max(rows, key=lambda row: row["sigma"])
+        self.assertEqual(best_by_sigma["roi"], 9)
+        self.assertNotEqual((best_by_sigma["roi"], best_by_sigma["zmax"]), (roi, zmax))
+
+
 if __name__ == "__main__":
     unittest.main()

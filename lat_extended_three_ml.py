@@ -53,6 +53,10 @@ from .runtime_env import ensure_analysis_runtime
 _LAT_PIPELINE_TIME_PAD_S = 5.0
 _LAT_WORKER_TIMEOUT_S = 3600.0
 
+# roi/zmax 扫描时用来观测显著度的 on 区半径（度）。取 PSF 尺度的固定值，
+# 对所有组合一致，否则组间不可比。
+_SCAN_ON_RADIUS_DEG = 1.0
+
 
 @contextlib.contextmanager
 def _working_directory(path: str) -> Iterator[None]:
@@ -272,17 +276,109 @@ def _make_lat_event_figure(
     plt.close(fig)
 
 
+def _angular_separation_deg(
+    ra0: float,
+    dec0: float,
+    ra: np.ndarray,
+    dec: np.ndarray,
+) -> np.ndarray:
+    """事例到给定天球位置的角距（度）。"""
+    lat0, lon0 = np.radians(float(dec0)), np.radians(float(ra0))
+    lat1, lon1 = np.radians(np.asarray(dec, dtype=float)), np.radians(np.asarray(ra, dtype=float))
+    cos_sep = np.sin(lat0) * np.sin(lat1) + np.cos(lat0) * np.cos(lat1) * np.cos(lon1 - lon0)
+    return np.degrees(np.arccos(np.clip(cos_sep, -1.0, 1.0)))
+
+
+def _li_ma_significance(n_on: int, n_off: int, alpha: float) -> float:
+    """Li & Ma (1983) 式 17 的 on/off 显著度。
+
+    超出为负时返回负值，便于排序时区分"没有超出"与"刚好为零"。
+    """
+    n_on, n_off = int(n_on), int(n_off)
+    alpha = float(alpha)
+    if alpha <= 0.0 or (n_on == 0 and n_off == 0):
+        return 0.0
+
+    total = n_on + n_off
+    term_on = n_on * np.log(((1.0 + alpha) / alpha) * (n_on / total)) if n_on > 0 else 0.0
+    term_off = n_off * np.log((1.0 + alpha) * (n_off / total)) if n_off > 0 else 0.0
+    value = float(np.sqrt(max(2.0 * (term_on + term_off), 0.0)))
+    return value if n_on >= alpha * n_off else -value
+
+
+def _on_off_significance(
+    filt_file: str,
+    ra: float,
+    dec: float,
+    roi: float,
+    on_radius: float = _SCAN_ON_RADIUS_DEG,
+) -> dict[str, Any]:
+    """在一次抽取的事例文件里做空间 on/off，估计源的显著度。
+
+    on 区是以源为心、半径 ``on_radius`` 的圆，off 区是 ``on_radius`` 到 ``roi``
+    之间的圆环，两者共用同一份 GTI 与曝光，因此 alpha 只是立体角之比、不含
+    时间——这正是这里用空间 on/off 而不用时间 on/off 的原因：流水线前后只各
+    留了 ``_LAT_PIPELINE_TIME_PAD_S`` 秒 padding，做不了时间本底。
+
+    这个函数只用于观测和记录，不参与任何选择；任何异常都吞掉并返回空值，
+    不能因为它把扫描本身弄挂。
+    """
+    empty = {"n_on": None, "n_off": None, "alpha": None, "excess": None, "sigma": None}
+    if float(roi) <= float(on_radius):
+        # 圆环退化，本底无从估计。
+        return empty
+
+    try:
+        with pyfits.open(filt_file) as event_file:
+            events = event_file["EVENTS"].data
+            sep = _angular_separation_deg(ra, dec, events["RA"], events["DEC"])
+
+        n_on = int(np.count_nonzero(sep <= float(on_radius)))
+        n_off = int(np.count_nonzero((sep > float(on_radius)) & (sep <= float(roi))))
+
+        # 立体角正比于 1 - cos(theta)
+        omega_on = 1.0 - np.cos(np.radians(float(on_radius)))
+        omega_off = np.cos(np.radians(float(on_radius))) - np.cos(np.radians(float(roi)))
+        if omega_off <= 0.0:
+            return empty
+        alpha = float(omega_on / omega_off)
+
+        return {
+            "n_on": n_on,
+            "n_off": n_off,
+            "alpha": round(alpha, 6),
+            "excess": round(n_on - alpha * n_off, 2),
+            "sigma": round(_li_ma_significance(n_on, n_off, alpha), 2),
+        }
+    except Exception as exc:  # noqa: BLE001
+        log(f"roi={roi} 的显著度估计失败（不影响扫描）: {exc}")
+        return empty
+
+
 def _scan_best_roi_zmax(lat_ds: LAT_dataset, irfs_sel: str, thetamax: float) -> tuple[int, int, list[dict[str, Any]]]:
+    """扫描 roi/zmax 组合。
+
+    选择判据仍然是 nEvents 最大，与历来一致。每组同时记录一份 on/off 显著度
+    作为对照列，只进日志、不参与选择——用来观察"按事例数选"和"按显著度选"
+    会不会选出不同的组合。
+    """
     rows: list[dict[str, Any]] = []
     best_combo: Optional[tuple[int, int]] = None
     best_n = -1
+
+    ra = float(getattr(lat_ds, "ra", float("nan")))
+    dec = float(getattr(lat_ds, "dec", float("nan")))
 
     for zmax in range(100, 106):
         for roi in range(1, 13):
             with _silence_stdio():
                 lat_ds.extract_events(roi, zmax, irfs_sel, thetamax, strategy="time")
             n_ev = int(lat_ds.nEvents)
-            rows.append({"zmax": zmax, "roi": roi, "nEvents": n_ev})
+            row: dict[str, Any] = {"zmax": zmax, "roi": roi, "nEvents": n_ev}
+            row.update(
+                _on_off_significance(getattr(lat_ds, "filt_file", ""), ra, dec, float(roi))
+            )
+            rows.append(row)
             if n_ev > best_n:
                 best_n = n_ev
                 best_combo = (roi, zmax)
@@ -585,8 +681,21 @@ def _run_lat_extended_three_ml_impl(
             lat_ds.extract_events(roi, zmax, irfs_sel, thetamax, strategy="time")
 
         result_data.update({"roi": roi, "zmax": zmax, "irf": irfs_sel})
-        scan_preview = pd.DataFrame(scan_rows).sort_values("nEvents", ascending=False).head().to_string(index=False)
-        log("LAT roi/zmax 扫描前几名:\n" + scan_preview)
+        scan_frame = pd.DataFrame(scan_rows)
+        scan_preview = scan_frame.sort_values("nEvents", ascending=False).head().to_string(index=False)
+        log("LAT roi/zmax 扫描前几名（按 nEvents，即实际生效的判据）:\n" + scan_preview)
+        if "sigma" in scan_frame.columns and scan_frame["sigma"].notna().any():
+            # 仅供对照：如果改按显著度选，会选出哪几组。
+            sigma_preview = (
+                scan_frame.dropna(subset=["sigma"])
+                .sort_values("sigma", ascending=False)
+                .head()
+                .to_string(index=False)
+            )
+            log(
+                f"LAT roi/zmax 扫描前几名（按 on/off 显著度，on 区半径 "
+                f"{_SCAN_ON_RADIUS_DEG:g}°，仅作对照，未参与选择）:\n" + sigma_preview
+            )
 
         with pyfits.open(lat_ds.filt_file) as event_file:
             events = event_file["EVENTS"].data
