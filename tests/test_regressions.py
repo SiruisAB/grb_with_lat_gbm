@@ -392,6 +392,76 @@ class ReviewFixRegressionTests(unittest.TestCase):
                 f"{burst.get('name')} 存在重名分段 {duplicated}: {names}",
             )
 
+    def test_parallel_jobs_reclaim_a_worker_that_never_exits(self) -> None:
+        """子进程交回结果后拒绝退出时，整批拟合不能挂死。
+
+        原来的 _run_parallel_model_jobs 用不带 timeout 的 process.join()，
+        子进程若卡在解释器退出阶段，父进程会带着已经取到的结果无限期等待。
+        """
+        from grb_project import project
+
+        class _StuckProcess:
+            """把结果放进队列后再也不退出的子进程。"""
+
+            def __init__(self):
+                self.exitcode = None
+                self._alive = True
+                self.join_timeouts = []
+                self.terminated = False
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return self._alive
+
+            def join(self, timeout=None):
+                if timeout is None:
+                    raise AssertionError("join() 没有超时，卡死的子进程会挂住整批拟合")
+                self.join_timeouts.append(timeout)
+
+            def terminate(self):
+                self.terminated = True
+                self._alive = False
+
+        class _FakeQueue:
+            def __init__(self):
+                self._items = [{"ok": True, "row": {"model": "band"}}]
+
+            def get(self, timeout=None):
+                if self._items:
+                    return self._items.pop(0)
+                raise queue.Empty
+
+            def close(self):
+                pass
+
+            def join_thread(self):
+                pass
+
+        created = []
+
+        class _FakeContext:
+            def Queue(self, maxsize=0):
+                return _FakeQueue()
+
+            def Process(self, target=None, args=(), name=None):
+                process = _StuckProcess()
+                created.append(process)
+                return process
+
+        with mock.patch.object(
+            project.mp, "get_all_start_methods", return_value=["fork"]
+        ), mock.patch.object(project.mp, "get_context", return_value=_FakeContext()):
+            outcomes = project._run_parallel_model_jobs([{"model_str": "band"}], 1)
+
+        self.assertEqual(outcomes, [{"ok": True, "row": {"model": "band"}}])
+        self.assertTrue(created[0].terminated, "卡死的子进程没有被回收")
+        self.assertTrue(
+            all(t is not None and t > 0 for t in created[0].join_timeouts),
+            f"join 的超时值不合法: {created[0].join_timeouts}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

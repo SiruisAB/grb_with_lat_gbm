@@ -114,6 +114,11 @@ def _model_fit_worker_entry(result_queue, fit_kwargs: dict) -> None:
         )
 
 
+# 子进程交回结果后，等待它自行退出的宽限时间（秒）。超过则强制回收，
+# 避免退出阶段卡死拖住整批拟合。
+_WORKER_EXIT_GRACE_S = 30.0
+
+
 def _run_parallel_model_jobs(jobs: Sequence[dict], max_workers: int) -> list[dict]:
     if "fork" not in mp.get_all_start_methods():
         raise RuntimeError("当前平台不支持 fork 多进程")
@@ -139,7 +144,16 @@ def _run_parallel_model_jobs(jobs: Sequence[dict], max_workers: int) -> list[dic
                     outcome = result_queue.get(timeout=0.5)
                 except queue_module.Empty:
                     continue
-            process.join()
+            # 子进程即使已经把结果放进队列，仍可能卡在解释器退出阶段
+            # （matplotlib/threeML 的 atexit 钩子、未回收的后台线程等）。
+            # 原来的 process.join() 没有超时，遇到这种情况整批拟合会带着
+            # 已经拿到手的结果无限期挂死，且没有任何日志。
+            process.join(timeout=_WORKER_EXIT_GRACE_S)
+            if process.is_alive():
+                # 只有结果已经取到（或子进程本就已退出）才会走到这里，
+                # 因此回收它不会丢失任何拟合结果。
+                process.terminate()
+                process.join(timeout=_WORKER_EXIT_GRACE_S)
             if outcome is None:
                 try:
                     outcome = result_queue.get(timeout=1.0)
