@@ -1847,8 +1847,12 @@ def discrete_spectr(
     else:
         emax = 1e5
     xs = np.logspace(np.log10(8.),5.0,100)
-    xs1 = np.logspace(5.0,np.log10(emax),100)
-    xs=np.append(xs, xs1[1:])
+    if emax > 1e5:
+        # 仅在 GBM+LAT 模式下才需要向 100 MeV 以上延伸。GBM-only 时
+        # emax 就是 1e5，np.logspace(5.0, 5.0, 100) 会退化成 100 个完全
+        # 相同的点，凭空给曲线和落盘的模型曲线文件塞进 99 行重复采样。
+        xs1 = np.logspace(5.0,np.log10(emax),100)
+        xs=np.append(xs, xs1[1:])
     fluxPL = k0*xs*xs*modelTotal(xs)
     if model_str in ['pl','band','blackbody','comp','SBPL','NDP','mbb']:
         plt.loglog(xs,k0*xs*xs*modelTotal(xs),'-',linewidth=2,label=model_str1, color='b')

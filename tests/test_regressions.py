@@ -519,6 +519,42 @@ class ReviewFixRegressionTests(unittest.TestCase):
 
         self.assertGreater(checked, 0, "special_bursts.yaml 中没有本底窗可供检查")
 
+    def test_lat_energy_grid_extension_is_conditional(self) -> None:
+        """向 100 MeV 以上延伸的能量网格必须是有条件的。
+
+        GBM-only 时 emax 就是 1e5，np.logspace(5.0, 5.0, 100) 会退化成
+        100 个完全相同的点，其中 99 个被无条件拼进 xs。这些重复采样会
+        原样写进 save_model_curve_data 落盘的模型曲线文件。
+        """
+        import ast
+        import inspect
+
+        from grb_project.separate_spectr import discrete_spectr
+
+        tree = ast.parse(inspect.getsource(discrete_spectr))
+
+        def assigns_xs1(node) -> bool:
+            return isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "xs1" for t in node.targets
+            )
+
+        # xs1 的赋值必须出现在某个 if 的分支里，而不是函数体的直线代码中。
+        guarded = any(
+            any(assigns_xs1(inner) for inner in ast.walk(node))
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+        )
+        found = any(assigns_xs1(node) for node in ast.walk(tree))
+
+        self.assertTrue(found, "discrete_spectr 中未找到 xs1 的赋值")
+        self.assertTrue(guarded, "LAT 能量网格的延伸是无条件的，GBM-only 会产生重复采样点")
+
+        # 同时钉死退化条件本身：logspace(5.0, 5.0, N) 确实是 N 个重复点。
+        import numpy as np
+
+        degenerate = np.logspace(5.0, np.log10(1e5), 100)
+        self.assertEqual(np.unique(degenerate).size, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
