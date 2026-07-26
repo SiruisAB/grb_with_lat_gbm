@@ -555,6 +555,47 @@ class ReviewFixRegressionTests(unittest.TestCase):
         degenerate = np.logspace(5.0, np.log10(1e5), 100)
         self.assertEqual(np.unique(degenerate).size, 1)
 
+    def test_hardcoded_backgrounds_agree_with_special_bursts_yaml(self) -> None:
+        """同一个暴的本底窗不能在两处给出不同答案。
+
+        gbm_core._build_background_interval_string 里按 bnname 硬编码了
+        若干暴的本底窗，special_bursts.yaml 里也有一份。凡是两处都出现的
+        暴，两份必须一致，否则改了一处忘了另一处就会静默用错本底。
+        """
+        import yaml
+
+        from grb_project.gbm_core import _build_background_interval_string
+        from grb_project.lightcurves import SPECIAL_BURSTS_YAML
+
+        # 一行不含任何特例的目录记录，用来识别"函数走了硬编码分支"。
+        row = pd.Series(
+            {
+                "back_interval_low_start": -20.0,
+                "back_interval_low_stop": -5.0,
+                "back_interval_high_start": 100.0,
+                "back_interval_high_stop": 150.0,
+            }
+        )
+        generic = _build_background_interval_string(row, "bn000000000")
+
+        with open(SPECIAL_BURSTS_YAML, encoding="utf-8") as handle:
+            bursts = yaml.safe_load(handle)["special_bursts"]
+
+        for burst in bursts:
+            bnname = str(burst.get("bnname") or "")
+            yaml_background = burst.get("background_interval")
+            if not bnname or not yaml_background:
+                continue
+            produced = _build_background_interval_string(row, bnname)
+            if produced == generic:
+                # gbm_core 对这个暴没有硬编码特例，无从比较。
+                continue
+            self.assertEqual(
+                produced,
+                str(yaml_background),
+                f"{bnname} 的本底窗在 gbm_core 与 special_bursts.yaml 中不一致",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
