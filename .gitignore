@@ -9,3 +9,7 @@ results3/
 /test/
 gtmktime.par
 gtselect.par
+
+# 编辑器/手工备份文件，不入库
+*.bak
+*.bak[0-9]

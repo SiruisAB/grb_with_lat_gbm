@@ -6,8 +6,14 @@ from unittest import mock
 
 import pandas as pd
 
+from grb_project.io_utils import merge_lat_catalog_frames
 from grb_project.project import run_joint_lightcurve
-from grb_project.web_app import _joint_gbm_lat_rows, _target_defaults
+from grb_project.web_app import (
+    _filter_joint_catalog_rows,
+    _joint_gbm_lat_rows,
+    _sync_special_editor_defaults,
+    _target_defaults,
+)
 
 
 def _import_lightcurves_with_stubs():
@@ -76,6 +82,106 @@ def test_joint_gbm_lat_rows_keeps_only_catalog_intersection():
     assert joint["value"].tolist() == [2]
 
 
+def test_filter_joint_catalog_rows_includes_all_years_by_default():
+    gbm_catalog = pd.DataFrame(
+        {"value": [1, 2, 3]},
+        index=["bn190101001", "bn230102002", "bn240103003"],
+    )
+    lat_catalog = pd.DataFrame(
+        {"trigger_met": [100.0, 200.0]},
+        index=["bn190101001", "bn240103003"],
+    )
+
+    joint = _filter_joint_catalog_rows(gbm_catalog, lat_catalog)
+
+    assert joint.index.tolist() == ["bn190101001", "bn240103003"]
+
+
+def test_filter_joint_catalog_rows_applies_configured_start_year():
+    gbm_catalog = pd.DataFrame(
+        {"value": [1, 2, 3]},
+        index=["bn190101001", "bn230102002", "bn240103003"],
+    )
+    lat_catalog = pd.DataFrame(
+        {"trigger_met": [100.0, 200.0, 300.0]},
+        index=gbm_catalog.index,
+    )
+
+    joint = _filter_joint_catalog_rows(gbm_catalog, lat_catalog, year_from=2023)
+
+    assert joint.index.tolist() == ["bn230102002", "bn240103003"]
+
+
+def test_merge_lat_catalog_frames_combines_historical_and_gcn_rows():
+    historical = pd.DataFrame(
+        {
+            "name": ["GRB190101001", "GRB220101002"],
+            "gcn_name": ["GRB190101A", "GRB220101A"],
+            "trigger_met": [100.0, 200.0],
+        }
+    )
+    gcn = pd.DataFrame(
+        {
+            "trigname": ["bn220101002", "bn240101003"],
+            "gcn_name": ["GRB220101B", "GRB240101A"],
+            "trigger_met": [220.0, 300.0],
+        }
+    )
+
+    merged = merge_lat_catalog_frames(historical, gcn)
+
+    assert merged.index.tolist() == ["bn190101001", "bn220101002", "bn240101003"]
+    assert merged.loc["bn220101002", "gcn_name"] == "GRB220101B"
+    assert merged.loc["bn220101002", "trigger_met"] == 220.0
+
+
+def test_special_editor_defaults_refresh_when_target_changes():
+    st = types.SimpleNamespace(session_state={})
+    _sync_special_editor_defaults(
+        st,
+        prefix="special_page",
+        target="bn231129799",
+        grb_name="GRB231129C",
+        active_interval="0.1-8.5",
+        background_low="-130--10",
+        background_high="100-200",
+        special_cfg={},
+        segments_text="bin1 0.1 1.0",
+    )
+    assert st.session_state["special_page_special_editor_name"] == "GRB231129C"
+    assert st.session_state["special_page_special_editor_bnname"] == "bn231129799"
+
+    st.session_state["special_page_special_editor_name"] = "manual edit"
+    _sync_special_editor_defaults(
+        st,
+        prefix="special_page",
+        target="bn231129799",
+        grb_name="GRB231129C",
+        active_interval="0.1-8.5",
+        background_low="-130--10",
+        background_high="100-200",
+        special_cfg={},
+        segments_text="bin1 0.1 1.0",
+    )
+    assert st.session_state["special_page_special_editor_name"] == "manual edit"
+
+    _sync_special_editor_defaults(
+        st,
+        prefix="special_page",
+        target="bn250313607",
+        grb_name="GRB250313A",
+        active_interval="-1-20",
+        background_low="-50--10",
+        background_high="50-100",
+        special_cfg={"name": "GRB250313A", "background_interval": "-40--5,60-120"},
+        segments_text="bin1 -1 2",
+    )
+    assert st.session_state["special_page_special_editor_name"] == "GRB250313A"
+    assert st.session_state["special_page_special_editor_bnname"] == "bn250313607"
+    assert st.session_state["special_page_special_editor_active_interval"] == "-1-20"
+    assert st.session_state["special_page_special_editor_background_interval"] == "-40--5,60-120"
+
+
 def test_expected_lightcurve_output_and_lat_input_layout(tmp_path):
     result_root = Path("/home/mxr/lee/gbmtest/results_sample")
     grb_name = "GRB231129C"
@@ -100,6 +206,13 @@ def test_discover_lat_prob_fit_files_uses_grb_lat_interval_layout(tmp_path):
     ignored.write_text("", encoding="utf-8")
 
     assert lightcurves.discover_lat_prob_fit_files(lat_dir) == [expected]
+
+
+def test_lightcurve_panel_titles_are_lowered_below_segment_labels():
+    source = (Path(__file__).parents[1] / "lightcurves.py").read_text(encoding="utf-8")
+
+    assert "PANEL_TITLE_Y = 0.88" in source
+    assert source.count("PANEL_TITLE_Y,") == 2
 
 
 def test_run_joint_lightcurve_passes_grb_lat_dir_to_prob_discovery(tmp_path):

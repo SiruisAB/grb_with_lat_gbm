@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import os
+import queue as queue_module
+import traceback
 from pathlib import Path
 from typing import Optional, Sequence
 
 import pandas as pd
 
 from .config import GRBProjectConfig, GRBRunOverrides, run_overrides_from_config
+from .io_utils import load_lat_catalog
 from .session import set_result_root, session
 
 
@@ -62,6 +67,99 @@ def _effective_fit_mode(requested_mode: str, lat_plugin: object) -> str:
     return "gbm"
 
 
+def _parallel_model_settings(
+    project_config: Optional[GRBProjectConfig],
+    run_overrides: Optional[GRBRunOverrides],
+) -> tuple[bool, int]:
+    enabled = bool(
+        _configured_value(run_overrides, project_config, "parallel_models", True)
+    )
+    raw_workers = _configured_value(run_overrides, project_config, "model_workers", 2)
+    try:
+        workers = max(1, int(raw_workers))
+    except (TypeError, ValueError):
+        workers = 2
+    return enabled and workers > 1, workers
+
+
+def _model_fit_worker_entry(result_queue, fit_kwargs: dict) -> None:
+    for variable in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[variable] = "1"
+    try:
+        from .bayesian_fit import _run_bayesian_analysis_for_model
+
+        try:
+            from threadpoolctl import threadpool_limits
+        except ImportError:
+            threadpool_limits = None
+
+        if threadpool_limits is None:
+            row = _run_bayesian_analysis_for_model(**fit_kwargs)
+        else:
+            with threadpool_limits(limits=1):
+                row = _run_bayesian_analysis_for_model(**fit_kwargs)
+        result_queue.put({"ok": True, "row": row})
+    except BaseException as exc:  # noqa: BLE001
+        result_queue.put(
+            {
+                "ok": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
+
+
+def _run_parallel_model_jobs(jobs: Sequence[dict], max_workers: int) -> list[dict]:
+    if "fork" not in mp.get_all_start_methods():
+        raise RuntimeError("当前平台不支持 fork 多进程")
+
+    context = mp.get_context("fork")
+    outcomes: list[Optional[dict]] = [None] * len(jobs)
+    for batch_start in range(0, len(jobs), max_workers):
+        batch = []
+        for job_index in range(batch_start, min(batch_start + max_workers, len(jobs))):
+            result_queue = context.Queue(maxsize=1)
+            process = context.Process(
+                target=_model_fit_worker_entry,
+                args=(result_queue, jobs[job_index]),
+                name=f"grb-model-{jobs[job_index]['model_str']}",
+            )
+            process.start()
+            batch.append((job_index, process, result_queue))
+
+        for job_index, process, result_queue in batch:
+            outcome = None
+            while outcome is None and process.is_alive():
+                try:
+                    outcome = result_queue.get(timeout=0.5)
+                except queue_module.Empty:
+                    continue
+            process.join()
+            if outcome is None:
+                try:
+                    outcome = result_queue.get(timeout=1.0)
+                except queue_module.Empty:
+                    outcome = {
+                        "ok": False,
+                        "error": f"模型子进程退出码 {process.exitcode}，但没有返回结果",
+                    }
+            try:
+                outcomes[job_index] = outcome
+            finally:
+                result_queue.close()
+                result_queue.join_thread()
+
+    return [
+        outcome or {"ok": False, "error": "模型子进程没有返回结果"}
+        for outcome in outcomes
+    ]
+
+
 def _catalog_frame_by_bnname(catalog: pd.DataFrame) -> pd.DataFrame:
     if "bnname" not in catalog.columns:
         return catalog
@@ -87,7 +185,7 @@ def _lookup_catalog_row(catalog: pd.DataFrame, target: str) -> pd.Series:
 
 def _lookup_lat_catalog_row(bnname: str) -> Optional[pd.Series]:
     try:
-        df = pd.read_excel(session.fermilat_grb_xls, sheet_name="GCN", index_col="trigname")
+        df = load_lat_catalog(session.fermilat_grb_xls)
     except Exception:
         return None
     try:
@@ -163,6 +261,9 @@ def _build_result_metadata(
     lightcurve_background_intervals: Optional[Sequence[str]] = None,
     lightcurve_path: Optional[str] = None,
     lightcurve_request: Optional[dict] = None,
+    parallel_models: Optional[bool] = None,
+    model_workers: Optional[int] = None,
+    plot_style: Optional[dict] = None,
 ) -> dict:
     payload = {
         "grb_name": grb_name,
@@ -196,6 +297,9 @@ def _build_result_metadata(
         "lightcurve_background_intervals": list(lightcurve_background_intervals) if lightcurve_background_intervals is not None else None,
         "lightcurve_path": lightcurve_path,
         "lightcurve_request": lightcurve_request,
+        "parallel_models": parallel_models,
+        "model_workers": model_workers,
+        "plot_style": plot_style,
     }
     (result_dir / "run_metadata.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -602,26 +706,62 @@ def _run_gbm_analysis(
             )
         datalist = DataList(lat_plugin, *plugins) if lat_plugin is not None else DataList(*plugins)
         duration = float(bin_end - bin_start)
+        plot_style = _configured_value(
+            run_overrides, project_config, "plot_style", None
+        )
+        model_jobs: list[dict] = []
+        model_dirs: list[Path] = []
         for model_str in models:
             model_dir = result_dir / model_str
             model_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                row = _run_bayesian_analysis_for_model(
-                    model_str=model_str,
-                    grb_name=grb_name,
-                    bnname=bnname,
-                    ra=float(ra),
-                    dec=float(dec),
-                    datalist=datalist,
-                    plugins=plugins,
-                    lat_plugin=lat_plugin,
-                    dets=successful_dets,
-                    result_dir=str(model_dir),
-                    bin_start=bin_start,
-                    bin_end=bin_end,
-                    duration=duration,
-                    analysis_mode=fit_mode,
-                )
+            model_dirs.append(model_dir)
+            model_jobs.append(
+                {
+                    "model_str": model_str,
+                    "grb_name": grb_name,
+                    "bnname": bnname,
+                    "ra": float(ra),
+                    "dec": float(dec),
+                    "datalist": datalist,
+                    "plugins": plugins,
+                    "lat_plugin": lat_plugin,
+                    "dets": successful_dets,
+                    "result_dir": str(model_dir),
+                    "bin_start": bin_start,
+                    "bin_end": bin_end,
+                    "duration": duration,
+                    "analysis_mode": fit_mode,
+                    "plot_style": plot_style,
+                }
+            )
+
+        parallel_models, model_workers = _parallel_model_settings(
+            project_config, run_overrides
+        )
+        use_parallel = (
+            parallel_models
+            and len(model_jobs) >= 2
+            and "fork" in mp.get_all_start_methods()
+        )
+        if use_parallel:
+            active_workers = min(model_workers, len(model_jobs))
+            log(
+                f"{bnname}: running {len(model_jobs)} models with "
+                f"{active_workers} parallel processes for bin {bin_start:g}-{bin_end:g}"
+            )
+            outcomes = _run_parallel_model_jobs(model_jobs, active_workers)
+        else:
+            outcomes = []
+            for fit_kwargs in model_jobs:
+                try:
+                    row = _run_bayesian_analysis_for_model(**fit_kwargs)
+                    outcomes.append({"ok": True, "row": row})
+                except Exception as exc:  # noqa: BLE001
+                    outcomes.append({"ok": False, "error": str(exc)})
+
+        for model_str, model_dir, outcome in zip(models, model_dirs, outcomes):
+            if outcome.get("ok"):
+                row = outcome["row"]
                 row.update(
                     {
                         "result_dir": str(model_dir),
@@ -636,37 +776,49 @@ def _run_gbm_analysis(
                             if _mode_includes(analysis_mode, "lat")
                             else "GBM 拟合已完成"
                         ),
+                        "parallel_models": use_parallel,
+                        "model_workers": (
+                            min(model_workers, len(model_jobs)) if use_parallel else 1
+                        ),
                     }
                 )
                 summary_rows.append(row)
-            except Exception as exc:  # noqa: BLE001
-                log(f"{bnname}: 模型 {model_str} 在 {bin_start:g}-{bin_end:g} 拟合失败: {exc}")
-                summary_rows.append(
-                    {
-                        "grb_name": grb_name,
-                        "bnname": bnname,
-                        "model": model_str,
-                        "analysis_mode": fit_mode,
-                        "AIC": None,
-                        "BIC": None,
-                        "Flux(erg/cm2/s)": None,
-                        "FTot(erg/cm2/s)": None,
-                        "Fluence(erg/cm2)": None,
-                        "FBB(erg/cm2/s)": None,
-                        "log_marginal_likelihood": None,
-                        "duration": duration,
-                        "num_time_bins": len(time_segments),
-                        "bin_start_time": bin_start,
-                        "bin_end_time": bin_end,
-                        "bin_duration": duration,
-                        "result_dir": str(model_dir),
-                        "source_dir": source_dir,
-                        "segment_tag": seg_tag,
-                        "detectors": ",".join(successful_dets),
-                        "analysis_status": "failed",
-                        "analysis_note": str(exc),
-                    }
-                )
+                continue
+
+            error = str(outcome.get("error") or "unknown model worker failure")
+            log(f"{bnname}: model {model_str} failed in {bin_start:g}-{bin_end:g}: {error}")
+            if outcome.get("traceback"):
+                log(str(outcome["traceback"]))
+            summary_rows.append(
+                {
+                    "grb_name": grb_name,
+                    "bnname": bnname,
+                    "model": model_str,
+                    "analysis_mode": fit_mode,
+                    "AIC": None,
+                    "BIC": None,
+                    "Flux(erg/cm2/s)": None,
+                    "FTot(erg/cm2/s)": None,
+                    "Fluence(erg/cm2)": None,
+                    "FBB(erg/cm2/s)": None,
+                    "log_marginal_likelihood": None,
+                    "duration": duration,
+                    "num_time_bins": len(time_segments),
+                    "bin_start_time": bin_start,
+                    "bin_end_time": bin_end,
+                    "bin_duration": duration,
+                    "result_dir": str(model_dir),
+                    "source_dir": source_dir,
+                    "segment_tag": seg_tag,
+                    "detectors": ",".join(successful_dets),
+                    "analysis_status": "failed",
+                    "analysis_note": error,
+                    "parallel_models": use_parallel,
+                    "model_workers": (
+                        min(model_workers, len(model_jobs)) if use_parallel else 1
+                    ),
+                }
+            )
     return summary_rows
 
 
@@ -720,6 +872,7 @@ def run_single_analysis(
 
     summary_rows: list[dict] = []
     models = _default_model_list(project_config, run_overrides)
+    parallel_models, model_workers = _parallel_model_settings(project_config, run_overrides)
     for target in target_list:
         try:
             catalog_row = _lookup_catalog_row(catalog_by_bn if target in catalog_by_bn.index else catalog, target)
@@ -841,6 +994,11 @@ def run_single_analysis(
             lightcurve_background_intervals=[
                 part.strip() for part in background_interval.split(",") if part.strip()
             ],
+            parallel_models=parallel_models,
+            model_workers=model_workers,
+            plot_style=_configured_value(
+                run_overrides, project_config, "plot_style", None
+            ),
         )
 
         source_dir = _resolve_gbm_source_dir(bnname, grb_name)

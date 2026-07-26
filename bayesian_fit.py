@@ -13,8 +13,46 @@ from astropy import units as u
 from astropy.io import fits as pyfits
 
 from .logging_utils import log
+from .publication_style import (
+    save_publication_figure,
+    style_corner_figure,
+    style_diagnostic_figure,
+)
+from .reproducibility_export import (
+    export_counts_figure_data,
+    export_spectral_reproducibility_bundle,
+)
 
 logg = logging.getLogger("threeML")
+
+
+def _rate_for_target_plot_bins(plugin, target_bins: int = 5) -> float:
+    try:
+        expected_rate = np.asarray(plugin.expected_model_rate, dtype=float)
+        total_rate = float(np.nansum(expected_rate))
+    except Exception:  # noqa: BLE001
+        return -1.0
+    if not np.isfinite(total_rate) or total_rate <= 0:
+        return -1.0
+    return float(np.nextafter(total_rate / max(1, int(target_bins)), 0.0))
+
+
+def _counts_plot_min_rates(
+    analysis,
+    lat_plugin,
+    bnname: str,
+    lat_target_bins: int = 5,
+) -> list[float]:
+    gbm_min_rate = 1.0
+    if bnname == "bn231222310":
+        gbm_min_rate = 0.01 if lat_plugin is not None else 2.0
+    rates: list[float] = []
+    for plugin in analysis.data_list.values():
+        if lat_plugin is not None and plugin is lat_plugin:
+            rates.append(_rate_for_target_plot_bins(plugin, lat_target_bins))
+        else:
+            rates.append(gbm_min_rate)
+    return rates
 
 
 def _run_bayesian_analysis_for_model(
@@ -32,6 +70,7 @@ def _run_bayesian_analysis_for_model(
     bin_end: float,
     duration: float,
     analysis_mode: str,
+    plot_style: Optional[dict] = None,
 ) -> Dict:
     from astromodels import Blackbody
     from grb_project.modelbuild import build_model
@@ -41,7 +80,7 @@ def _run_bayesian_analysis_for_model(
     fluxdata_dir = os.path.join(result_dir, "fluxdata")
     os.makedirs(fluxdata_dir, exist_ok=True)
 
-    spectral_model = build_model(model_str)
+    spectral_model = build_model(model_str, analysis_mode=analysis_mode)
     grb = PointSource("GRB", ra=ra, dec=dec, spectral_shape=spectral_model)
     model = Model(grb)
     model.display(complete=True)
@@ -57,7 +96,8 @@ def _run_bayesian_analysis_for_model(
 
     corner_fig = bs.results.corner_plot()
     corner_fig_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_{bin_start}-{bin_end}_{suffix}_corner_plot.png")
-    plt.savefig(corner_fig_path)
+    style_corner_figure(corner_fig, plot_style)
+    save_publication_figure(corner_fig, corner_fig_path)
     plt.close(corner_fig)
 
     bs.results.display()
@@ -69,13 +109,36 @@ def _run_bayesian_analysis_for_model(
         parameter_value_errors = results_data[1].data.field(4)
         parameters = results_data[1].data.field(0)
 
+    reproducibility_dir: Optional[str] = None
     try:
-        min_rate = [0.01, 1, 1, 1] if "lat" in analysis_mode.lower() else [1, 1, 1]
-        if bnname == "bn231222310":
-            min_rate = [0.01, 0.01, 0.01, 0.01] if "lat" in analysis_mode.lower() else 2
+        reproducibility_dir = str(
+            export_spectral_reproducibility_bundle(
+                bs,
+                result_dir=result_dir,
+                grb_name=grb_name,
+                bnname=bnname,
+                model_name=model_str,
+                bin_start=bin_start,
+                bin_end=bin_end,
+                analysis_mode=analysis_mode,
+                detector_names=dets,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logg.error("警告: 保存可复现光谱结果失败: %s", exc)
+
+    try:
+        lat_target_bins = int((plot_style or {}).get("lat_plot_bins", 5))
+        min_rate = _counts_plot_min_rates(
+            bs, lat_plugin, bnname, lat_target_bins=lat_target_bins
+        )
+        logg.info("Counts plot min_rate by dataset: %s", min_rate)
         spec_fig = display_spectrum_model_counts(bs, min_rate=min_rate)
         spec_fig_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_counts_{suffix}_spectrum_{bin_start}-{bin_end}.png")
-        spec_fig.savefig(spec_fig_path)
+        style_diagnostic_figure(spec_fig, plot_style)
+        save_publication_figure(spec_fig, spec_fig_path)
+        if reproducibility_dir is not None:
+            export_counts_figure_data(spec_fig, reproducibility_dir)
         plt.close(spec_fig)
     except Exception as exc:  # noqa: BLE001
         logg.error("警告: 绘制频谱图失败: %s", exc)
@@ -92,7 +155,8 @@ def _run_bayesian_analysis_for_model(
         ax = fig_sed.get_axes()[0]
         ax.set_ylim(1e-10, 1e-5)
         sed_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_{suffix}_spectrum_{bin_start}-{bin_end}_total.png")
-        fig_sed.savefig(sed_path)
+        style_diagnostic_figure(fig_sed, plot_style)
+        save_publication_figure(fig_sed, sed_path)
         plt.close(fig_sed)
     except Exception as exc:  # noqa: BLE001
         log(f"警告: 绘制SED图失败: {exc}")
@@ -111,6 +175,7 @@ def _run_bayesian_analysis_for_model(
             bin_end=bin_end,
             analysis_mode=analysis_mode,
             output_dir=fluxdata_dir,
+            plot_style=plot_style,
         )
     except Exception as exc:  # noqa: BLE001
         logg.error("警告: 绘制分离谱失败: %s", exc)
@@ -176,6 +241,7 @@ def _run_bayesian_analysis_for_model(
         "bin_start_time": bin_start,
         "bin_end_time": bin_end,
         "bin_duration": bin_end - bin_start,
+        "reproducibility_dir": reproducibility_dir,
     }
     summary_entry.update(param_dict)
     return summary_entry

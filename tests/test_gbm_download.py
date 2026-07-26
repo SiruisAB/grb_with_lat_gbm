@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest import mock
 import unittest
 
+import pandas as pd
+
 
 class FakeFTP:
     def __init__(self) -> None:
@@ -44,6 +46,27 @@ class InterruptedFTP(FakeFTP):
 
 
 class GBMDownloadTests(unittest.TestCase):
+    def test_joint_targets_compare_four_digit_year_range(self) -> None:
+        from grb_project.gbm_download import get_joint_target_list
+
+        lat_catalog = pd.DataFrame({"GRBname": ["GRB080825C", "GRB231129C"]})
+        gbm_catalog = pd.DataFrame(
+            {"trigger_name": ["bn080825593", "bn231129799"]}
+        )
+        with mock.patch(
+            "grb_project.gbm_download.pd.read_csv", return_value=lat_catalog
+        ), mock.patch(
+            "grb_project.gbm_download.pd.read_excel", return_value=gbm_catalog
+        ):
+            targets = get_joint_target_list(
+                Path("/tmp/lat.csv"),
+                Path("/tmp/gbm.xls"),
+                year_from=2008,
+                year_to=2022,
+            )
+
+        self.assertEqual(targets, ["bn080825593"])
+
     def test_normalize_bnname_rejects_path_traversal(self) -> None:
         from grb_project.gbm_download import normalize_bnname
 

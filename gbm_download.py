@@ -82,7 +82,7 @@ def get_joint_target_list(
     for bn in df_merge["trigger_name"].dropna().astype(str).unique():
         bnname = normalize_bnname(bn)
         try:
-            year = int(extract_year_from_bnname(bnname)[2:])
+            year = int(extract_year_from_bnname(bnname))
         except ValueError:
             continue
         if year < year_from:

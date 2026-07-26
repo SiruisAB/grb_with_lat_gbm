@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from typing import List, Tuple
 
@@ -10,6 +11,37 @@ import pandas as pd
 
 from .logging_utils import log
 from .session import session
+
+
+def normalize_lat_trigger_name(value: object) -> str | None:
+    match = re.search(r"(\d{9})", str(value).strip())
+    return f"bn{match.group(1)}" if match else None
+
+
+def merge_lat_catalog_frames(historical: pd.DataFrame, gcn: pd.DataFrame) -> pd.DataFrame:
+    historical = historical.copy()
+    gcn = gcn.copy()
+
+    historical.index = historical.get("name", pd.Series(index=historical.index, dtype=object)).map(
+        normalize_lat_trigger_name
+    )
+    gcn.index = gcn.get("trigname", pd.Series(index=gcn.index, dtype=object)).map(
+        normalize_lat_trigger_name
+    )
+
+    merged = pd.concat(
+        [historical.loc[historical.index.notna()], gcn.loc[gcn.index.notna()]],
+        axis=0,
+        sort=False,
+    )
+    return merged.loc[~merged.index.duplicated(keep="last")]
+
+
+def load_lat_catalog(xls_path: str | None = None) -> pd.DataFrame:
+    path = xls_path if xls_path is not None else session.fermilat_grb_xls
+    historical = pd.read_excel(path, sheet_name="fermilgrb")
+    gcn = pd.read_excel(path, sheet_name="GCN")
+    return merge_lat_catalog_frames(historical, gcn)
 
 
 def read_gcn_bn_triggers(xls_path: str | None = None) -> Tuple[List[str], List[str]]:

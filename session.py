@@ -14,7 +14,7 @@ class AnalysisSessionState:
     catalog_xls: str = "/home/mxr/lee/data/GBMcatolog.xls"
     merged_xls: str = "/home/mxr/lee/newflietest/merged_grb_fit_results.xlsx"
     fermilat_grb_xls: str = "/home/mxr/lee/fermilat-grb.xls"
-    result_root: str = "/home/mxr/lee/gbmtest/results"
+    result_root: str = "/home/mxr/lee/gbmtest/results_last"
     summary_csv_name: str = "summary_results.csv"
     log_file_handle: Optional[TextIO] = None
     extended_lat_data_root: str = "/home/mxr/lee/data/fermilat/Extended_data_ex"

@@ -21,7 +21,7 @@ class GRBProjectConfig:
     catalog_xls: str = "/home/mxr/lee/data/GBMcatolog.xls"
     merged_xls: str = "/home/mxr/lee/newflietest/merged_grb_fit_results.xlsx"
     fermilat_grb_xls: str = "/home/mxr/lee/fermilat-grb.xls"
-    result_root: str = "/home/mxr/lee/gbmtest/results"
+    result_root: str = "/home/mxr/lee/gbmtest/results_last"
     summary_csv_name: str = "summary_results.csv"
     analysis_mode: str = "gbm+lat"
     fixed_num_time_bins: Optional[int] = None
@@ -45,6 +45,9 @@ class GRBProjectConfig:
     lightcurve_active_interval: Optional[str] = None
     lightcurve_background_intervals: Optional[Sequence[str]] = None
     models: Optional[Sequence[str]] = None
+    parallel_models: bool = True
+    model_workers: int = 2
+    plot_style: Optional[dict] = None
     special_yaml: Optional[str] = None
     special_burst_name: Optional[str] = None
     model_preset: Optional[str] = None
@@ -71,6 +74,9 @@ class GRBRunOverrides:
     lightcurve_active_interval: Optional[str] = None
     lightcurve_background_intervals: Optional[Sequence[str]] = None
     models: Optional[Sequence[str]] = None
+    parallel_models: Optional[bool] = None
+    model_workers: Optional[int] = None
+    plot_style: Optional[dict] = None
     special_yaml: Optional[str] = None
     special_burst_name: Optional[str] = None
 
@@ -97,6 +103,9 @@ class GRBRunOverrides:
                 "lightcurve_active_interval",
                 "lightcurve_background_intervals",
                 "models",
+                "parallel_models",
+                "model_workers",
+                "plot_style",
                 "special_yaml",
                 "special_burst_name",
             )
@@ -124,6 +133,9 @@ def run_overrides_from_config(cfg: GRBProjectConfig) -> Optional[GRBRunOverrides
         lightcurve_active_interval=cfg.lightcurve_active_interval,
         lightcurve_background_intervals=cfg.lightcurve_background_intervals,
         models=cfg.models,
+        parallel_models=cfg.parallel_models,
+        model_workers=cfg.model_workers,
+        plot_style=cfg.plot_style,
         special_yaml=cfg.special_yaml,
         special_burst_name=cfg.special_burst_name,
     )

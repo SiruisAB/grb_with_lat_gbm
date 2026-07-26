@@ -2,8 +2,8 @@ special_bursts:
 - name: GRB231129C
   bnname: bn231129799
   description: 特殊时间分段与背景窗
-  active_interval: "0.1-8.5"
-  background_interval: "-130--10,100-200"
+  active_interval: 0.1-8.5
+  background_interval: -130--10,100-200
   time_segments:
   - name: seg1
     start: 0.1
@@ -23,7 +23,7 @@ special_bursts:
 - name: GRB250313A
   bnname: bn250313607
   description: 特殊时间分段与背景窗
-  background_interval: "-24--5,100-150,350-400"
+  background_interval: -24--5,100-150,350-400
   time_segments:
   - name: block1_seg1
     start: 1.09
@@ -55,7 +55,7 @@ special_bursts:
 - name: GRB240825A
   bnname: bn240825662
   description: 特殊时间分段与背景窗
-  background_interval: "-23.960--2.080,75-100,140-160"
+  background_interval: -23.960--2.080,75-100,140-160
   time_segments:
   - name: seg1
     start: 1.15
@@ -72,3 +72,27 @@ special_bursts:
   - name: seg5
     start: 2.68
     stop: 5.12
+- name: GRB240118A
+  bnname: bn240118075
+  description: 特殊时间分段与背景窗
+  active_interval: 45.313-99.33
+  background_interval: -19.79--2.6,141.15-166.15
+  time_segments:
+  - name: seg1
+    start: 45.3
+    stop: 54.4
+  - name: seg2
+    start: 54.4
+    stop: 57.5
+  - name: seg3
+    start: 57.5
+    stop: 63.0
+  - name: seg4
+    start: 63.0
+    stop: 69.2
+  - name: seg4
+    start: 69.2
+    stop: 79.0
+  - name: seg5
+    start: 79.0
+    stop: 99.0

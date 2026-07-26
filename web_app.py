@@ -46,6 +46,7 @@ if __package__ in (None, ""):
 
 from grb_project.config import GRBProjectConfig, GRBRunOverrides
 from grb_project import gbm_download, lat_download, lat_gcn_extract
+from grb_project.io_utils import load_lat_catalog
 from grb_project.project import GRBProject, _build_result_metadata, run_joint_lightcurve
 from grb_project.session import set_result_root
 from grb_project.special_bursts import (
@@ -61,6 +62,33 @@ DEFAULT_BGO_BAND = (300.0, 38000.0)
 DEFAULT_BACKGROUND_LOW = "-24--5"
 DEFAULT_BACKGROUND_HIGH = "350-400"
 SPECIAL_BURSTS_YAML = Path(__file__).with_name("special_bursts.yaml")
+SUPPORTED_MODELS = (
+    "band",
+    "comp",
+    "blackbody",
+    "NDP",
+    "pl",
+    "SBPL",
+    "band+bb",
+    "mbb",
+    "band+mbb",
+    "mbb+pl",
+    "band+pl",
+    "comp+bb",
+    "comp+pl",
+    "pl+bb",
+    "band+bb+pl",
+    "band+gauss",
+)
+
+
+def _show_lightcurve_plot(st, png_path: Path, *, caption: str) -> Path:
+    html_path = Path(png_path).with_suffix(".html")
+    if html_path.is_file():
+        st.components.v1.html(html_path.read_text(encoding="utf-8"), height=900, scrolling=True)
+        return html_path
+    st.image(str(png_path), caption=caption, use_container_width=True)
+    return Path(png_path)
 
 
 def _load_catalog(cfg: GRBProjectConfig) -> pd.DataFrame:
@@ -73,9 +101,7 @@ def _load_catalog(cfg: GRBProjectConfig) -> pd.DataFrame:
 
 
 def _load_fermilat_catalog(cfg: GRBProjectConfig) -> pd.DataFrame:
-    df = pd.read_excel(cfg.fermilat_grb_xls, sheet_name="GCN", index_col="trigname")
-    df.index = df.index.astype(str)
-    return df
+    return load_lat_catalog(cfg.fermilat_grb_xls)
 
 
 def _default_target(df: pd.DataFrame) -> str:
@@ -100,20 +126,28 @@ def _catalog_year_from_label(label: str) -> Optional[int]:
     return 2000 + int(year_part)
 
 
-def _recent_catalog_rows(df_catalog: pd.DataFrame) -> pd.DataFrame:
-    years = df_catalog.index.astype(str).map(_catalog_year_from_label)
-    recent = df_catalog.loc[years >= 2022].copy()
-    return recent if not recent.empty else df_catalog.copy()
-
-
 def _joint_gbm_lat_rows(df_catalog: pd.DataFrame, fermilat_catalog: pd.DataFrame) -> pd.DataFrame:
     lat_targets = set(fermilat_catalog.index.astype(str))
     return df_catalog.loc[df_catalog.index.astype(str).isin(lat_targets)].copy()
 
 
-def _parse_models(text: str) -> list[str]:
-    models = [item.strip() for item in str(text).split(",") if item.strip()]
-    return models or ["band", "comp", "blackbody"]
+def _filter_joint_catalog_rows(
+    df_catalog: pd.DataFrame,
+    fermilat_catalog: pd.DataFrame,
+    year_from: Optional[int] = None,
+) -> pd.DataFrame:
+    joint = _joint_gbm_lat_rows(df_catalog, fermilat_catalog)
+    if year_from is None:
+        return joint
+    years = joint.index.astype(str).map(_catalog_year_from_label)
+    return joint.loc[years >= int(year_from)].copy()
+
+
+def _validate_selected_models(selected_models: Sequence[str]) -> list[str]:
+    models = [str(item).strip() for item in selected_models if str(item).strip()]
+    if not models:
+        raise ValueError("至少选择一个模型")
+    return models
 
 
 def _parse_download_list_text(text: str) -> list[str]:
@@ -367,6 +401,36 @@ def _show_target_context(st, *, defaults: dict[str, object]) -> None:
     cols[1].write(f"**DEC**：{float(defaults['dec']):.6f}")
 
 
+def _sync_special_editor_defaults(
+    st,
+    *,
+    prefix: str,
+    target: str,
+    grb_name: str,
+    active_interval: str,
+    background_low: str,
+    background_high: str,
+    special_cfg: dict,
+    segments_text: str,
+) -> None:
+    state_key = f"{prefix}_special_editor_selected_target"
+    if st.session_state.get(state_key) == target:
+        return
+    st.session_state[state_key] = target
+    st.session_state[f"{prefix}_special_editor_name"] = str(special_cfg.get("name") or grb_name).strip()
+    st.session_state[f"{prefix}_special_editor_bnname"] = str(special_cfg.get("bnname") or target).strip()
+    st.session_state[f"{prefix}_special_editor_active_interval"] = str(
+        special_cfg.get("active_interval") or active_interval
+    ).strip()
+    st.session_state[f"{prefix}_special_editor_background_interval"] = str(
+        special_cfg.get("background_interval") or f"{background_low},{background_high}"
+    ).strip()
+    st.session_state[f"{prefix}_special_editor_description"] = str(
+        special_cfg.get("description") or "特殊时间分段与背景窗"
+    )
+    st.session_state[f"{prefix}_special_editor_segments_text"] = segments_text
+
+
 def _render_special_burst_editor(
     st,
     *,
@@ -384,6 +448,17 @@ def _render_special_burst_editor(
         special_cfg = {}
     existing_segments = special_cfg.get("time_segments") or []
     existing_text = format_time_segments_text(existing_segments) if existing_segments else ""
+    _sync_special_editor_defaults(
+        st,
+        prefix=prefix,
+        target=target,
+        grb_name=grb_name,
+        active_interval=active_interval,
+        background_low=background_low,
+        background_high=background_high,
+        special_cfg=special_cfg,
+        segments_text=existing_text,
+    )
 
     with st.expander("特殊时间分 bin 写入 special_bursts.yaml", expanded=expanded):
         st.caption("保存后会按 bnname 覆盖已有条目；其他特殊暴配置会保留。")
@@ -532,11 +607,158 @@ def _run_single_analysis_page(
         lat_three_ml_full = st.checkbox("lat_three_ml_full", value=False, key="single_lat_three_ml_full")
         plot_joint_lightcurve = st.checkbox("plot_joint_lightcurve", value=True, key="single_plot_joint_lightcurve")
     with col2:
-        models_text = st.text_input("models（逗号分隔）", value="band,comp,blackbody", key="single_models_text")
+        selected_models = st.multiselect(
+            "models",
+            options=SUPPORTED_MODELS,
+            default=["band"],
+            key="single_models",
+        )
+        parallel_models = st.checkbox(
+            "parallel_models",
+            value=True,
+            key="single_parallel_models",
+        )
+        model_workers = st.number_input(
+            "model_workers",
+            min_value=1,
+            max_value=4,
+            value=2,
+            step=1,
+            key="single_model_workers",
+            disabled=not parallel_models,
+        )
         special_yaml = st.text_input("special_yaml", value="", key="single_special_yaml")
         special_burst_name = st.text_input("special_burst_name", value="", key="single_special_burst_name")
 
+    with st.expander("绘图版式", expanded=False):
+        canvas_left, canvas_mid, canvas_right = st.columns(3)
+        with canvas_left:
+            diagnostic_width = st.number_input(
+                "Counts/SED 宽度 (in)", min_value=2.5, max_value=12.0,
+                value=5.0, step=0.1, key="single_diagnostic_width"
+            )
+            diagnostic_height = st.number_input(
+                "Counts/SED 高度 (in)", min_value=2.5, max_value=12.0,
+                value=3.8, step=0.1, key="single_diagnostic_height"
+            )
+        with canvas_mid:
+            spectrum_width = st.number_input(
+                "分离谱宽度 (in)", min_value=2.5, max_value=12.0,
+                value=12.0, step=0.1, key="single_spectrum_width_reference_v2"
+            )
+            spectrum_height = st.number_input(
+                "分离谱高度 (in)", min_value=2.5, max_value=12.0,
+                value=8.0, step=0.1, key="single_spectrum_height_reference_v2"
+            )
+            spectrum_font_mode_label = st.selectbox(
+                "分离谱字号模式",
+                options=("参考原图字号", "按论文最终字号缩放"),
+                index=0,
+                key="single_spectrum_font_mode_v2",
+            )
+        with canvas_right:
+            corner_width = st.number_input(
+                "Corner 宽度 (in)", min_value=3.0, max_value=14.0,
+                value=5.0, step=0.1, key="single_corner_width"
+            )
+            corner_height = st.number_input(
+                "Corner 高度 (in)", min_value=3.0, max_value=14.0,
+                value=5.0, step=0.1, key="single_corner_height"
+            )
+
+        font_left, font_mid, font_right = st.columns(3)
+        with font_left:
+            axis_label_pt = st.number_input(
+                "最终轴标题字号 (pt)", min_value=5.0, max_value=16.0,
+                value=8.5, step=0.5, key="single_axis_label_pt"
+            )
+        with font_mid:
+            tick_label_pt = st.number_input(
+                "最终刻度字号 (pt)", min_value=5.0, max_value=16.0,
+                value=8.0, step=0.5, key="single_tick_label_pt"
+            )
+        with font_right:
+            legend_pt = st.number_input(
+                "最终图例字号 (pt)", min_value=5.0, max_value=16.0,
+                value=8.0, step=0.5, key="single_legend_pt"
+            )
+
+        legend_counts, legend_spectrum, legend_counts_cols, legend_spectrum_cols, legend_bins = st.columns(5)
+        legend_position_labels = {
+            "顶部图例带": "top",
+            "右上": "upper right",
+            "左上": "upper left",
+            "右下": "lower right",
+            "左下": "lower left",
+        }
+        with legend_counts:
+            diagnostic_legend_position_label = st.selectbox(
+                "Counts/SED 图例位置",
+                options=list(legend_position_labels),
+                index=0,
+                key="single_diagnostic_legend_position_v2",
+            )
+        with legend_spectrum:
+            spectrum_legend_position_label = st.selectbox(
+                "分离谱图例位置",
+                options=list(legend_position_labels),
+                index=2,
+                key="single_spectrum_legend_position_v2",
+            )
+            spectrum_legend_frame = st.checkbox(
+                "分离谱图例边框",
+                value=True,
+                key="single_spectrum_legend_frame_v2",
+            )
+        with legend_counts_cols:
+            diagnostic_legend_columns = st.number_input(
+                "Counts 图例列数", min_value=1, max_value=6, value=4, step=1,
+                key="single_diagnostic_legend_columns"
+            )
+        with legend_spectrum_cols:
+            spectrum_legend_columns = st.number_input(
+                "分离谱图例列数", min_value=1, max_value=6, value=2, step=1,
+                key="single_spectrum_legend_columns_reference_v2"
+            )
+        with legend_bins:
+            lat_plot_bins = st.number_input(
+                "LAT 展示 bin 数", min_value=2, max_value=20, value=5, step=1,
+                key="single_lat_plot_bins"
+            )
+            show_lat_upper_limits = st.checkbox(
+                "LAT 95% 上限", value=True,
+                key="single_show_lat_upper_limits",
+                help="绘制 LAT 95% upper-limit 箭头"
+            )
+
+    plot_style = {
+        "diagnostic_width_in": float(diagnostic_width),
+        "diagnostic_height_in": float(diagnostic_height),
+        "spectrum_width_in": float(spectrum_width),
+        "spectrum_height_in": float(spectrum_height),
+        "corner_width_in": float(corner_width),
+        "corner_height_in": float(corner_height),
+        "axis_label_pt": float(axis_label_pt),
+        "tick_label_pt": float(tick_label_pt),
+        "legend_pt": float(legend_pt),
+        "diagnostic_legend_position": legend_position_labels[diagnostic_legend_position_label],
+        "spectrum_legend_position": legend_position_labels[spectrum_legend_position_label],
+        "spectrum_legend_frame": bool(spectrum_legend_frame),
+        "spectrum_font_mode": (
+            "reference" if spectrum_font_mode_label == "参考原图字号" else "manuscript"
+        ),
+        "diagnostic_legend_columns": int(diagnostic_legend_columns),
+        "spectrum_legend_columns": int(spectrum_legend_columns),
+        "lat_plot_bins": int(lat_plot_bins),
+        "show_lat_upper_limits": bool(show_lat_upper_limits),
+    }
+
     if st.button("开始运行", type="primary", key="single_run_button"):
+        try:
+            models = _validate_selected_models(selected_models)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
         run_overrides = GRBRunOverrides(
             grbname=grb_name.strip() or str(defaults["grb_name"]),
             t0=float(t0),
@@ -552,7 +774,10 @@ def _run_single_analysis_page(
             gbm_display_pad_after_s=float(gbm_pad_after),
             lightcurve_active_interval=str(active_interval),
             lightcurve_background_intervals=(str(background_low), str(background_high)),
-            models=_parse_models(models_text),
+            models=models,
+            parallel_models=bool(parallel_models),
+            model_workers=int(model_workers),
+            plot_style=plot_style,
             special_yaml=special_yaml.strip() or None,
             special_burst_name=special_burst_name.strip() or None,
         )
@@ -574,6 +799,9 @@ def _run_single_analysis_page(
         project.config.gbm_display_pad_before_s = run_overrides.gbm_display_pad_before_s
         project.config.gbm_display_pad_after_s = run_overrides.gbm_display_pad_after_s
         project.config.models = run_overrides.models
+        project.config.parallel_models = bool(run_overrides.parallel_models)
+        project.config.model_workers = int(run_overrides.model_workers or 1)
+        project.config.plot_style = run_overrides.plot_style
         project.config.special_yaml = run_overrides.special_yaml
         project.config.special_burst_name = run_overrides.special_burst_name
         project.config.lightcurve_active_interval = str(active_interval)
@@ -783,7 +1011,11 @@ def _run_lightcurve_page(
                     },
                 )
                 _show_result_summary(st, result_path=Path(lc_out).resolve(), metadata=metadata)
-                st.image(str(lc_out), caption=f"{grb_name.strip() or str(defaults['grb_name'])} 光变曲线", use_container_width=True)
+                _show_lightcurve_plot(
+                    st,
+                    Path(lc_out),
+                    caption=f"{grb_name.strip() or str(defaults['grb_name'])} 光变曲线",
+                )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"光变曲线生成失败：{exc}")
 
@@ -921,30 +1153,70 @@ def _run_gbm_download_page(*, st, base_cfg: GRBProjectConfig) -> None:
                 st.error(f"LAT 下载失败：{exc}")
 
 
-def _run_special_burst_page(*, st) -> None:
+def _run_special_burst_page(
+    *,
+    st,
+    df_catalog: pd.DataFrame,
+    fermilat_catalog: pd.DataFrame,
+    target_options: Sequence[str],
+    default_target: str,
+) -> None:
     st.markdown("#### 特殊暴分 bin")
     st.caption("把某个暴的特殊时间分段和背景窗写入项目内 special_bursts.yaml。")
 
+    target = st.selectbox(
+        "bnname / 目标 GRB",
+        options=target_options,
+        index=target_options.index(default_target),
+        key="special_page_target",
+    )
+    catalog_row = df_catalog.loc[target]
+    if isinstance(catalog_row, pd.DataFrame):
+        catalog_row = catalog_row.iloc[0]
+    lat_row = fermilat_catalog.loc[target] if target in fermilat_catalog.index else None
+    if isinstance(lat_row, pd.DataFrame):
+        lat_row = lat_row.iloc[0]
+    defaults = _sync_target_defaults(
+        st,
+        prefix="special_page",
+        target=target,
+        catalog_row=catalog_row,
+        lat_row=lat_row,
+    )
+
+    _show_target_context(st, defaults=defaults)
+
     cols = st.columns(2)
     with cols[0]:
-        target = st.text_input("bnname", value="bn231129799", key="special_page_bnname")
-        active_interval = st.text_input("active_interval", value="0.1-8.5", key="special_page_active_interval")
-    with cols[1]:
-        grb_name = st.text_input("name", value="GRB231129C", key="special_page_grb_name")
-        background_interval = st.text_input(
-            "background_interval",
-            value="-130--10,100-200",
-            key="special_page_background_interval",
+        grb_name = st.text_input(
+            "name / GRBname",
+            value=str(defaults["grb_name"]),
+            key="special_page_grb_name",
         )
-    bg_parts = _parse_background_intervals(background_interval, (DEFAULT_BACKGROUND_LOW, DEFAULT_BACKGROUND_HIGH))
+        active_interval = st.text_input(
+            "active_interval",
+            value=str(defaults["active_interval"]),
+            key="special_page_active_interval",
+        )
+    with cols[1]:
+        background_low = st.text_input(
+            "background_low",
+            value=str(defaults["background_low"]),
+            key="special_page_background_low",
+        )
+        background_high = st.text_input(
+            "background_high",
+            value=str(defaults["background_high"]),
+            key="special_page_background_high",
+        )
     _render_special_burst_editor(
         st,
         prefix="special_page",
-        target=target.strip(),
+        target=target,
         grb_name=grb_name.strip(),
         active_interval=active_interval.strip(),
-        background_low=bg_parts[0],
-        background_high=bg_parts[1],
+        background_low=background_low.strip(),
+        background_high=background_high.strip(),
         expanded=True,
     )
 
@@ -965,36 +1237,58 @@ def main() -> None:
     if page == "GBM 数据下载":
         _run_gbm_download_page(st=st, base_cfg=base_cfg)
         return
-    if page == "特殊暴分 bin":
-        _run_special_burst_page(st=st)
-        return
-
     try:
         df_catalog = _load_catalog(base_cfg)
         fermilat_catalog = _load_fermilat_catalog(base_cfg)
-        df_recent = _recent_catalog_rows(df_catalog)
-        df_recent = _joint_gbm_lat_rows(df_recent, fermilat_catalog)
-        if df_recent.empty:
-            st.error("最近样本中没有同时存在于 GBM 和 LAT catalog 的暴")
+        year_mode = st.selectbox(
+            "联合分析样本年份",
+            options=("所有年份", "指定起始年份"),
+            index=0,
+            key="joint_catalog_year_mode",
+        )
+        year_from = None
+        if year_mode == "指定起始年份":
+            year_from = int(
+                st.number_input(
+                    "起始年份",
+                    min_value=2008,
+                    max_value=2100,
+                    value=2022,
+                    step=1,
+                    key="joint_catalog_year_from",
+                )
+            )
+        df_joint = _filter_joint_catalog_rows(df_catalog, fermilat_catalog, year_from=year_from)
+        if df_joint.empty:
+            st.error("当前年份范围内没有同时存在于 GBM 和 LAT catalog 的暴")
             return
-        default_target = _default_target(df_recent)
+        default_target = _default_target(df_joint)
     except Exception as exc:  # noqa: BLE001
         st.error(f"无法加载目录表：{exc}")
         return
 
-    target_options = df_recent.index.astype(str).tolist()
+    target_options = df_joint.index.astype(str).tolist()
 
     st.subheader("目录表概况")
-    with st.expander("查看最近样本", expanded=False):
+    with st.expander("查看可联合分析样本", expanded=False):
         left, right = st.columns([1.2, 1])
         with left:
             st.caption(f"目录表总行数：{len(df_catalog)}")
-            st.caption(f"2022 年后且 GBM/LAT 共同样本数：{len(df_recent)}")
+            range_label = "所有年份" if year_from is None else f"{year_from} 年起"
+            st.caption(f"{range_label} GBM/LAT 共同样本数：{len(df_joint)}")
         with right:
             st.caption(f"默认目标：{default_target}")
-        st.dataframe(_make_catalog_summary(df_recent).head(10), use_container_width=True)
+        st.dataframe(_make_catalog_summary(df_joint), use_container_width=True)
 
-    if page == "单次分析":
+    if page == "特殊暴分 bin":
+        _run_special_burst_page(
+            st=st,
+            df_catalog=df_catalog,
+            fermilat_catalog=fermilat_catalog,
+            target_options=target_options,
+            default_target=default_target,
+        )
+    elif page == "单次分析":
         _run_single_analysis_page(
             st=st,
             base_cfg=base_cfg,

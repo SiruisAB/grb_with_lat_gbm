@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,6 +28,20 @@ from .gbm_detector_selection import select_gbm_detectors
 from .runtime_env import ensure_analysis_runtime
 from .session import session
 from .logging_utils import log
+from .interactive_lightcurves import interactive_lightcurve_path, write_interactive_lightcurve_html
+from .publication_style import (
+    AXES_LINEWIDTH,
+    LIGHTCURVE_ANNOTATION_SIZE,
+    LIGHTCURVE_AXIS_LABEL_SIZE,
+    LIGHTCURVE_FIGSIZE,
+    LIGHTCURVE_TICK_LABEL_SIZE,
+    RASTER_DPI,
+    configure_publication_matplotlib,
+    save_publication_figure,
+    style_lightcurve_axes,
+)
+
+configure_publication_matplotlib()
 
 SPECIAL_BURSTS_YAML = Path(__file__).with_name("special_bursts.yaml")
 
@@ -38,6 +52,7 @@ TITLE_BOX = dict(
     linewidth=0.75,
     alpha=0.95,
 )
+PANEL_TITLE_Y = 0.88
 
 PAPER_DETECTOR_STYLES = {
     "nai_n3": {"marker": "P", "color": "#4e79a7"},
@@ -368,7 +383,7 @@ def annotate_spectral_time_bins(
                 transform=ax.get_xaxis_transform(),
                 ha="center",
                 va="top",
-                fontsize=10,
+                fontsize=LIGHTCURVE_ANNOTATION_SIZE,
                 color=label_color,
                 zorder=5,
                 clip_on=True,
@@ -490,7 +505,7 @@ def shade_time_segments(
                 transform=ax.get_xaxis_transform(),
                 ha="center",
                 va="top",
-                fontsize=9,
+                fontsize=LIGHTCURVE_ANNOTATION_SIZE,
                 color=line_color,
                 zorder=6,
                 clip_on=True,
@@ -558,7 +573,7 @@ def plot_mean_lightcurve_on_ax(
     use_echans_start: int,
     use_echans_stop: int,
     title: str = "",
-) -> None:
+) -> Dict[str, Any]:
     """多探头平均率；本底选中时段 step 填充；需在图外另行 ``shade_active_interval``。"""
     rates = []
     bkgs = []
@@ -625,24 +640,22 @@ def plot_mean_lightcurve_on_ax(
             np.mean(time_bins, axis=1),
             np.mean(np.stack(bkgs, axis=0), axis=0),
             color=bkg_line_color,
-            lw=2.0,
+            lw=1.0,
             label="Background",
         )
 
     ax.set_ylabel("Rate (cnts/s)")
     ax.text(
         0.98,
-        0.97,
+        PANEL_TITLE_Y,
         title,
         transform=ax.transAxes,
         ha="right",
         va="top",
-        fontsize=11,
+        fontsize=LIGHTCURVE_ANNOTATION_SIZE,
         bbox=TITLE_BOX,
     )
-    ax.tick_params(axis="both", which="major", labelsize=14)
-    ax.tick_params(axis="both", which="minor", labelsize=12)
-    ax.set_ylabel("Rate (cnts/s)", fontsize=15)
+    style_lightcurve_axes(ax, show_all_spines=True)
     ax.set_xlim(float(start), float(stop))
     w0 = np.array(
         [tsb_list[0].time_series.exposure_over_interval(t0, t1) for t0, t1 in time_bins]
@@ -651,6 +664,13 @@ def plot_mean_lightcurve_on_ax(
     if np.any(m):
         mr = mean_rate[m]
         ax.set_ylim(max(0, float(mr.min()) * 0.9), float(mr.max()) * 1.15)
+    mean_background = np.mean(np.stack(bkgs, axis=0), axis=0) if all(b is not None for b in bkgs) else None
+    return {
+        "title": str(title),
+        "time": np.mean(time_bins, axis=1),
+        "rate": mean_rate,
+        "background": mean_background,
+    }
 
 
 def plot_gbm_lat_lightcurve_figure(
@@ -679,7 +699,7 @@ def plot_gbm_lat_lightcurve_figure(
     band_titles: Optional[Sequence[str]] = None,
     out_path: Optional[Union[str, Path]] = None,
     figure_size: Optional[Tuple[float, float]] = None,
-    dpi: int = 150,
+    dpi: int = RASTER_DPI,
     include_lat: bool = True,
     spectral_time_bins: Optional[Sequence[Union[np.ndarray, Sequence[float]]]] = None,
     special_time_segments: Optional[Sequence[dict]] = None,
@@ -712,6 +732,7 @@ def plot_gbm_lat_lightcurve_figure(
         BGO 子图能量范围 [keV]，由 TTE 的 EBOUNDS 映射为道址；默认 ``(300, 38000)``。
     out_path
         若给定则 ``savefig``；默认 ``{grb_name}_Lightcurve.png`` 保存在当前工作目录。
+        同时生成同名 ``.html`` 交互图，可离线打开并悬停查看数据点。
     spectral_time_bins
         与光谱拟合一致的时间 bin 边序列列表（``_build_time_bins_list`` 的返回值）。
         当总段数 ≥ 2 时，在各 GBM/LAT 子图上画绿色竖直虚线并在段顶标注 a/b/c…。
@@ -869,7 +890,7 @@ def plot_gbm_lat_lightcurve_figure(
     n_rows = 4 if lat_show_panel else 3
     fig_wh = figure_size
     if fig_wh is None:
-        fig_wh = (8.5, 12.0) if lat_show_panel else (8.5, 9.0)
+        fig_wh = LIGHTCURVE_FIGSIZE if lat_show_panel else (LIGHTCURVE_FIGSIZE[0], 6.45)
 
     fig, axes = plt.subplots(
         n_rows,
@@ -884,11 +905,12 @@ def plot_gbm_lat_lightcurve_figure(
         _a.set_axisbelow(True)
         for _s in _a.spines.values():
             _s.set_visible(True)
-            _s.set_linewidth(0.9)
+            _s.set_linewidth(AXES_LINEWIDTH)
 
+    interactive_gbm_panels: List[Dict[str, Any]] = []
     for ax, (elo, ehi), ttl in zip(axes[:2], nai_kev_bands, titles_use):
         es, ee = kev_band_to_echan(ref_tte, elo, ehi)
-        plot_mean_lightcurve_on_ax(
+        panel_data = plot_mean_lightcurve_on_ax(
             nai_builders,
             ax,
             start=gbm_start,
@@ -898,8 +920,10 @@ def plot_gbm_lat_lightcurve_figure(
             use_echans_stop=ee,
             title=str(ttl),
         )
+        if isinstance(panel_data, dict):
+            interactive_gbm_panels.append(panel_data)
 
-    plot_mean_lightcurve_on_ax(
+    bgo_panel_data = plot_mean_lightcurve_on_ax(
         [bgo_b],
         axes[2],
         start=gbm_start,
@@ -909,6 +933,8 @@ def plot_gbm_lat_lightcurve_figure(
         use_echans_stop=bgo_ee,
         title=f"BGO {bgo_detector_id} ({bgo_lo:g}–{bgo_hi:g} keV)",
     )
+    if isinstance(bgo_panel_data, dict):
+        interactive_gbm_panels.append(bgo_panel_data)
 
     if lat_show_panel and lat_time_rel is not None and lat_energy_mev is not None and lat_plot is not None:
         ax_lat = axes[3]
@@ -927,19 +953,18 @@ def plot_gbm_lat_lightcurve_figure(
             color="C1",
             zorder=2,
         )
-        ax_lat.set_ylabel(f"LAT events / {lat_bin_s:g} s", fontsize=15)
+        ax_lat.set_ylabel(f"LAT events / {lat_bin_s:g} s", fontsize=LIGHTCURVE_AXIS_LABEL_SIZE)
         ax_lat.text(
             0.98,
-            0.97,
+            PANEL_TITLE_Y,
             f"LAT ≥ {lat_emin_mev:g} MeV",
             transform=ax_lat.transAxes,
             ha="right",
             va="top",
-            fontsize=11,
+            fontsize=LIGHTCURVE_ANNOTATION_SIZE,
             bbox=TITLE_BOX,
         )
-        ax_lat.tick_params(axis="both", which="major", labelsize=14)
-        ax_lat.tick_params(axis="both", which="minor", labelsize=12)
+        style_lightcurve_axes(ax_lat, show_all_spines=True)
         ax_lat.grid(True, alpha=0.3)
 
         ax_e = ax_lat.twinx()
@@ -970,9 +995,9 @@ def plot_gbm_lat_lightcurve_figure(
         ax_e.set_yscale("log")
         if lat_emin_mev > 0:
             ax_e.set_ylim(bottom=lat_emin_mev)
-        ax_e.set_ylabel("Energy [MeV]", fontsize=15)
-        ax_e.tick_params(axis="y", which="major", labelsize=13)
-        ax_e.tick_params(axis="y", which="minor", labelsize=11)
+        ax_e.set_ylabel("Energy [MeV]", fontsize=LIGHTCURVE_AXIS_LABEL_SIZE)
+        ax_e.tick_params(axis="y", which="major", labelsize=LIGHTCURVE_TICK_LABEL_SIZE)
+        ax_e.tick_params(axis="y", which="minor", labelsize=LIGHTCURVE_TICK_LABEL_SIZE)
         bottom_ax = ax_lat
     else:
         bottom_ax = axes[2]
@@ -1002,7 +1027,26 @@ def plot_gbm_lat_lightcurve_figure(
             f"{lo:g}-{hi:g}".replace(".", "p") for lo, hi in nai_kev_bands
         )
         save_to = f"{grb_name}_lightcurve_{nai_tag}_{gbm_start:g}_{gbm_stop:g}.png"
-    fig.savefig(str(save_to), dpi=dpi)
+    save_publication_figure(fig, save_to, dpi=dpi, bbox_inches="tight")
+    interactive_lat_data: Optional[Dict[str, np.ndarray]] = None
+    if lat_show_panel and lat_time_rel is not None and lat_energy_mev is not None and lat_prob is not None and lat_plot is not None:
+        lat_counts, lat_edges = np.histogram(lat_time_rel[lat_plot], bins=lat_bins)
+        interactive_lat_data = {
+            "time": lat_time_rel[lat_plot],
+            "energy": lat_energy_mev[lat_plot],
+            "probability": lat_prob[lat_plot],
+            "bin_edges": lat_edges,
+            "counts": lat_counts,
+        }
+    try:
+        write_interactive_lightcurve_html(
+            interactive_lightcurve_path(save_to),
+            gbm_panels=interactive_gbm_panels,
+            lat_data=interactive_lat_data,
+            x_range=(float(gbm_start), float(gbm_stop)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"{bnname}: 交互光变图生成失败，已保留 PNG: {exc}")
     plt.close(fig)
 
     return fig

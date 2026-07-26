@@ -11,6 +11,52 @@ import pandas as pd
 
 
 class ProjectRegressionTests(unittest.TestCase):
+    def test_plot_style_is_preserved_in_run_overrides(self) -> None:
+        from grb_project.config import GRBProjectConfig, run_overrides_from_config
+
+        style = {
+            "diagnostic_width_in": 6.0,
+            "legend_position": "upper left",
+            "lat_plot_bins": 6,
+        }
+        overrides = run_overrides_from_config(GRBProjectConfig(plot_style=style))
+
+        self.assertIsNotNone(overrides)
+        self.assertEqual(overrides.plot_style, style)
+
+    def test_legacy_legend_position_updates_both_figure_types(self) -> None:
+        from grb_project.publication_style import normalize_plot_style
+
+        style = normalize_plot_style({"legend_position": "lower right"})
+
+        self.assertEqual(style["diagnostic_legend_position"], "lower right")
+        self.assertEqual(style["spectrum_legend_position"], "lower right")
+
+    def test_counts_plot_uses_about_five_lat_bins(self) -> None:
+        from grb_project.bayesian_fit import _counts_plot_min_rates
+
+        class Plugin:
+            def __init__(self, rates):
+                self.expected_model_rate = rates
+
+        lat = Plugin([1.0, 2.0, 3.0, 4.0])
+        gbm = Plugin([10.0])
+        analysis = mock.Mock(data_list={"LAT": lat, "n7": gbm})
+
+        rates = _counts_plot_min_rates(analysis, lat, "bn123", lat_target_bins=5)
+
+        self.assertAlmostEqual(rates[0], 2.0)
+        self.assertEqual(rates[1], 1.0)
+
+    def test_counts_plot_handles_extremely_small_lat_model_rate(self) -> None:
+        from grb_project.bayesian_fit import _rate_for_target_plot_bins
+
+        plugin = mock.Mock(expected_model_rate=[1.6232825494985804e-164])
+        min_rate = _rate_for_target_plot_bins(plugin, target_bins=5)
+
+        self.assertGreaterEqual(min_rate, 0.0)
+        self.assertLess(min_rate, sum(plugin.expected_model_rate))
+
     def test_runtime_intervals_prefer_run_overrides(self) -> None:
         from grb_project.config import GRBRunOverrides
         from grb_project.project import _resolve_runtime_intervals
@@ -92,6 +138,27 @@ class ProjectRegressionTests(unittest.TestCase):
                 GRBProjectConfig(plot_joint_lightcurve=True),
                 "plot_joint_lightcurve",
             )
+        )
+
+    def test_parallel_model_settings_default_to_two_workers(self) -> None:
+        from grb_project.config import GRBProjectConfig
+        from grb_project.project import _parallel_model_settings
+
+        self.assertEqual(
+            _parallel_model_settings(GRBProjectConfig(), None),
+            (True, 2),
+        )
+
+    def test_parallel_model_settings_can_be_disabled_per_run(self) -> None:
+        from grb_project.config import GRBProjectConfig, GRBRunOverrides
+        from grb_project.project import _parallel_model_settings
+
+        self.assertEqual(
+            _parallel_model_settings(
+                GRBProjectConfig(parallel_models=True, model_workers=4),
+                GRBRunOverrides(parallel_models=False, model_workers=3),
+            ),
+            (False, 3),
         )
 
     @staticmethod

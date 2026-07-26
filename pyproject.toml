@@ -13,6 +13,7 @@ dependencies = [
   "numpy",
   "openpyxl",
   "pandas",
+  "plotly",
   "PyYAML",
   "requests",
   "streamlit",
