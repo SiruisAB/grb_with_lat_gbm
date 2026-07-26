@@ -429,7 +429,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
 
 
         pl.K.prior = Log_uniform_prior(lower_bound=1e-10, upper_bound=1e3)
-        pl.index.prior =  Truncated_gaussian(lower_bound=parameters[4]-0.5, upper_bound=parameters[4]+0.5, mu=-2, sigma=0.5)           
+        pl.index.prior =  Truncated_gaussian(lower_bound=parameters[7]-0.5, upper_bound=parameters[7]+0.5, mu=-2, sigma=0.5)           
         pl.K.min_value, pl.K.max_value = 1e-10, 1e3
         pl.index.min_value, pl.index.max_value = -5, 5
         pl.K, pl.index = parameters[6], parameters[7]
