@@ -279,6 +279,9 @@ class LatWorkerRegressionTests(unittest.TestCase):
         proc.join.assert_called()
 
 
+class ReviewFixRegressionTests(unittest.TestCase):
+    """2026 年代码审查中修复的问题所对应的回归测试。"""
+
     def test_fit_and_plot_models_use_the_same_pivot_energy(self) -> None:
         """拟合与出图必须共用同一 pivot 能量。
 
