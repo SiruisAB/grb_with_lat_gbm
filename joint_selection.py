@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import pandas as pd
 
@@ -273,6 +273,24 @@ def format_selection_report(result: JointSelectionResult, max_listed: int = 20) 
     return "\n".join(lines)
 
 
+def restrict_result_targets(
+    result: JointSelectionResult, only: Sequence[str]
+) -> JointSelectionResult:
+    """把选择结果收窄到指定 bn 子集（只能收窄，不能引入未选中的目标）。"""
+    known = {t.bnname for t in result.targets}
+    wanted = [str(b).strip().lower() for b in dict.fromkeys(only)]
+    unknown = [b for b in wanted if b not in known]
+    if unknown:
+        raise ValueError("以下 bn 不在当前选择结果中: " + ", ".join(unknown))
+    keep = set(wanted)
+    return JointSelectionResult(
+        criteria=result.criteria,
+        targets=[t for t in result.targets if t.bnname in keep],
+        excluded=result.excluded,
+        table_path=result.table_path,
+    )
+
+
 def add_selection_arguments(parser) -> None:
     parser.add_argument("--year-from", type=int, default=None, help="起始年份（含）")
     parser.add_argument("--year-to", type=int, default=None, help="截止年份（含）")
@@ -294,6 +312,9 @@ def add_selection_arguments(parser) -> None:
     parser.add_argument("--summary-csv-name", default=None)
     parser.add_argument("--session-log", action="store_true")
     parser.add_argument("--models", nargs="+", default=None, help="透传给分析的模型列表")
+    parser.add_argument(
+        "--only", nargs="+", default=None, help="仅保留选中结果里的这些 bn（子集收窄）"
+    )
 
 
 def cli_main_from_args(args):
@@ -307,6 +328,8 @@ def cli_main_from_args(args):
     )
     table = load_joint_target_table(args.table) if args.table else None
     result = select_joint_targets(criteria, table=table)
+    if args.only:
+        result = restrict_result_targets(result, args.only)
     print(format_selection_report(result))
 
     if args.output:

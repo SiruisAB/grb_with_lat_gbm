@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -1239,6 +1242,105 @@ def _run_special_burst_page(
     )
 
 
+def _joint_batch_run_state_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "joint_batch_run.json"
+
+
+def _read_joint_batch_run_state() -> Optional[dict]:
+    path = _joint_batch_run_state_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _joint_batch_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _build_joint_batch_command(
+    *,
+    analysis_mode: str,
+    result_root: str,
+    summary_csv_name: str,
+    models: Sequence[str],
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+    min_lat_ts: Optional[float] = None,
+    include_lle_only: bool = False,
+    only: Optional[Sequence[str]] = None,
+) -> list:
+    """构造后台批量运行的 select --run 命令（纯函数，便于测试）。"""
+    cmd = [
+        sys.executable,
+        "-m",
+        "grb_project",
+        "select",
+        "--analysis-mode",
+        str(analysis_mode),
+        "--run",
+        "--result-root",
+        str(Path(result_root).expanduser()),
+        "--summary-csv-name",
+        str(summary_csv_name),
+        "--session-log",
+        "--models",
+        *[str(m) for m in models],
+    ]
+    if year_from is not None:
+        cmd += ["--year-from", str(int(year_from))]
+    if year_to is not None:
+        cmd += ["--year-to", str(int(year_to))]
+    if min_lat_ts is not None:
+        cmd += ["--min-lat-ts", f"{float(min_lat_ts):g}"]
+    if include_lle_only:
+        cmd.append("--include-lle-only")
+    if only:
+        cmd += ["--only", *[str(b) for b in only]]
+    return cmd
+
+
+def _launch_joint_batch_run(
+    *, target_count: int, log_tail_hint: str = "", **command_kwargs
+) -> dict:
+    """以独立后台进程启动批量联合分析，日志写结果目录，状态写 gbmtest 根。"""
+    cmd = _build_joint_batch_command(**command_kwargs)
+    cwd = Path(__file__).resolve().parent.parent
+    result_root = Path(command_kwargs["result_root"]).expanduser()
+    result_root.mkdir(parents=True, exist_ok=True)
+    log_path = result_root / "joint_batch_run.log"
+    with log_path.open("ab") as log_fh:
+        log_fh.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动 =====\n".encode("utf-8"))
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    state = {
+        "pid": proc.pid,
+        "cmd": cmd,
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "log": str(log_path),
+        "result_root": str(result_root),
+        "targets": int(target_count),
+    }
+    _joint_batch_run_state_path().write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return state
+
+
 def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
     from grb_project.joint_selection import JointSelectionCriteria, select_joint_targets
 
@@ -1294,14 +1396,87 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
         mime="text/csv",
         disabled=df.empty,
     )
-    cmd = (
-        f"python -m grb_project select --year-from {year_from} --year-to {year_to}"
-        + (f" --min-lat-ts {min_ts_raw:g}" if min_ts_raw > 0 else "")
-        + (" --include-lle-only" if include_lle else "")
-        + " --run"
-    )
-    st.caption("等价 CLI（加 --run 可直接启动批量联合分析）：")
-    st.code(cmd, language="bash")
+    st.markdown("---")
+    state = _read_joint_batch_run_state()
+    running = bool(state and _joint_batch_pid_alive(int(state["pid"])))
+    if running:
+        st.warning(
+            f"已有批量任务在运行（PID {state['pid']}，{state.get('targets', '?')} 个目标，"
+            f"启动于 {state.get('started', '?')}）；结束后才能再次启动。"
+        )
+
+    with st.expander("批量运行设置", expanded=not running):
+        run_result_root = str(
+            st.text_input(
+                "结果目录",
+                value="/home/mxr/lee/gbmtest/results_joint_batch",
+                key="joint_run_result_root",
+            )
+        ).strip()
+        run_summary_csv = str(
+            st.text_input(
+                "汇总 CSV 文件名", value="summary_results.csv", key="joint_run_summary_csv"
+            )
+        ).strip() or "summary_results.csv"
+        run_mode = str(
+            st.selectbox("分析模式", ("gbm+lat", "lat"), index=0, key="joint_run_mode")
+        )
+        run_models = st.multiselect(
+            "模型（至少选一个）", list(SUPPORTED_MODELS), default=["band"], key="joint_run_models"
+        )
+        scope = st.radio("目标范围", ("全部选中目标", "手动挑选子集"), key="joint_run_scope")
+        chosen = None
+        if scope == "手动挑选子集":
+            chosen = st.multiselect("要运行的暴（bn 名）", result.bnnames, key="joint_run_targets")
+        st.caption(
+            "点击启动后会在服务器后台以独立进程运行批量联合分析"
+            "（python -m grb_project select --run），页面可以关闭；"
+            "日志写入结果目录下 joint_batch_run.log。"
+        )
+        launched = st.button("启动批量联合分析", disabled=running, key="joint_run_launch")
+
+    if launched:
+        try:
+            models_validated = _validate_selected_models(run_models)
+            if chosen is not None and not chosen:
+                raise ValueError("手动挑选子集时至少选择一个暴")
+            if not run_result_root:
+                raise ValueError("结果目录不能为空")
+            target_count = len(chosen) if chosen is not None else len(result.targets)
+            info = _launch_joint_batch_run(
+                analysis_mode=run_mode,
+                result_root=run_result_root,
+                summary_csv_name=run_summary_csv,
+                models=models_validated,
+                year_from=year_from,
+                year_to=year_to,
+                min_lat_ts=criteria.min_lat_ts,
+                include_lle_only=include_lle,
+                only=chosen,
+                target_count=target_count,
+            )
+            st.success(
+                f"已在后台启动批量分析：PID {info['pid']}，{info['targets']} 个目标，"
+                f"日志 {info['log']}"
+            )
+            state = info
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"启动失败：{exc}")
+
+    if state:
+        alive = _joint_batch_pid_alive(int(state["pid"]))
+        st.markdown("---")
+        st.subheader("最近一次批量运行")
+        st.write(
+            f"状态：{'运行中' if alive else '已结束'}　PID：{state['pid']}　"
+            f"目标：{state.get('targets', '?')} 个　启动于：{state.get('started', '?')}"
+        )
+        st.code(" ".join(state.get("cmd", [])), language="bash")
+        log_path = Path(state["log"]) if state.get("log") else None
+        if log_path is not None and log_path.exists():
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            with st.expander(f"日志尾部（{log_path}）", expanded=alive):
+                st.code("\n".join(lines[-15:]) or "（暂无输出）")
 
 
 def main() -> None:

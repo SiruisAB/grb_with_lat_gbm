@@ -93,3 +93,14 @@
 - **Web 端批量执行/任务队列**：2026-06-24 计划中的 task_store/worker 体系尚未落地；本计划的 Web 页面只做选择与导出，不阻塞、不启动分析。
 - **gbm-only 模式选择**：本表宇宙是 LAT 候选暴；GBM 全目录选择走既有 `--gcn-all`/目录表流程。
 - **修改既有分析流程**（analyze_single/pipeline.main 的行为不动，`--run` 只是复用）。
+
+---
+
+## 附记（2026-09-14 当日追加）
+
+应用户要求，把原划出范围的「Web 端批量执行」纳入当日实现：
+
+- 选择页面新增「批量运行设置」：结果目录、汇总 CSV 文件名、分析模式、模型（SUPPORTED_MODELS 多选）、目标范围（全部选中 / 手动挑选子集）。
+- 「启动批量联合分析」按钮以**独立后台进程**运行 `python -m grb_project select ... --run`（日志写结果目录 `joint_batch_run.log`，状态写 gbmtest 根 `joint_batch_run.json`）；页面显示最近一次运行的存活状态、完整命令与日志尾部，运行中禁止重复启动。
+- `select` CLI 相应新增 `--only`（把选择结果收窄到指定 bn 子集，只能收窄）。
+- 任务队列（task_store/worker）体系仍不在本计划；后台进程方案避免阻塞 Streamlit 且页面可关闭。
