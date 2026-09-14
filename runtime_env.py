@@ -92,23 +92,49 @@ def ensure_threeML_minimizer_for_background_fit() -> None:
         )
         return
 
+    def _read_default() -> str:
+        node = threeML_config["mle"]["default_minimizer"]
+        return str(getattr(node, "value", node)).upper()
+
     try:
-        default_key = str(threeML_config["mle"]["default_minimizer"].value).upper()
+        default_key = _read_default()
     except Exception:
         default_key = "MINUIT"
 
-    if default_key in minimization._minimizers:
-        return
+    if default_key not in minimization._minimizers:
+        fallback = "SCIPY" if "SCIPY" in minimization._minimizers else available[0]
+        # threeML_config["mle"]["default_minimizer"] 取出来是不可变的 Optimizer 枚举成员，
+        # 给它的 .value 赋值只会抛 AttributeError（曾被 except: pass 吞掉，于是日志报告
+        # “已改用 SCIPY”而实际什么都没改）。必须按 key 写回配置树，并回读确认。
+        applied = False
+        try:
+            threeML_config["mle"]["default_minimizer"] = fallback.lower()
+            applied = _read_default() == fallback
+        except Exception as exc:  # noqa: BLE001
+            log(f"threeML 默认 minimizer 改写失败: {type(exc).__name__}: {exc}")
+        if applied:
+            log(
+                f"threeML 默认 minimizer「{default_key}」不可用，已改用「{fallback}」；"
+                f"当前可用: {available}。"
+            )
+        else:
+            log(
+                f"警告: threeML 默认 minimizer「{default_key}」不可用，且回退到"
+                f"「{fallback}」未生效；当前可用: {available}。"
+            )
 
-    fallback = "SCIPY" if "SCIPY" in minimization._minimizers else available[0]
-    try:
-        threeML_config["mle"]["default_minimizer"].value = fallback.lower()
-    except Exception:
-        pass
-    log(
-        f"threeML 默认 minimizer「{default_key}」不可用，已改用「{fallback}」用于 GBM 背景窗拟合；"
-        f"当前可用: {available}。若需 minuit：conda install -c conda-forge iminuit"
-    )
+    if "MINUIT" not in minimization._minimizers:
+        # 关键：改默认 minimizer 并不能救 GBM 背景窗拟合。threeML 的
+        # utils/time_series/polynomial.py 在 polyfit() 里硬编码了 set_minimizer("minuit")，
+        # 所以 MINUIT 缺失时 set_background_interval 必然抛 MinimizerNotAvailable。
+        log(
+            "警告: MINUIT 未注册，而 threeML 的 polyfit() 内部硬编码 "
+            'set_minimizer("minuit")，GBM 背景窗多项式拟合仍会抛 '
+            "MinimizerNotAvailable，改默认 minimizer 绕不过去。常见原因是 iminuit 的 "
+            "_core*.so 需要 CXXABI_1.3.15，却加载到了系统较旧的 libstdc++；解决办法："
+            "export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+            "（已写入 envs/threeML/etc/conda/activate.d/zz_libstdcxx_activate.sh）。"
+        )
 
 
 def ensure_analysis_runtime() -> None:
