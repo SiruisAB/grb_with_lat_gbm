@@ -1277,6 +1277,7 @@ def _build_joint_batch_command(
     min_lat_ts: Optional[float] = None,
     include_lle_only: bool = False,
     only: Optional[Sequence[str]] = None,
+    lat_extended_three_ml: bool = False,
 ) -> list:
     """构造后台批量运行的 select --run 命令（纯函数，便于测试）。"""
     cmd = [
@@ -1305,6 +1306,8 @@ def _build_joint_batch_command(
         cmd.append("--include-lle-only")
     if only:
         cmd += ["--only", *[str(b) for b in only]]
+    if lat_extended_three_ml:
+        cmd.append("--lat-extended-three-ml")
     return cmd
 
 
@@ -1424,6 +1427,13 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
         run_models = st.multiselect(
             "模型（至少选一个）", list(SUPPORTED_MODELS), default=["band"], key="joint_run_models"
         )
+        run_lat_three_ml = bool(
+            st.checkbox(
+                "lat_three_ml_full（LAT Extended + GtBurst + threeML 全流程，非常耗时）",
+                value=False,
+                key="joint_run_lat_three_ml",
+            )
+        )
         scope = st.radio("目标范围", ("全部选中目标", "手动挑选子集"), key="joint_run_scope")
         chosen = None
         if scope == "手动挑选子集":
@@ -1453,6 +1463,7 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
                 min_lat_ts=criteria.min_lat_ts,
                 include_lle_only=include_lle,
                 only=chosen,
+                lat_extended_three_ml=run_lat_three_ml,
                 target_count=target_count,
             )
             st.success(

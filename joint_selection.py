@@ -315,6 +315,11 @@ def add_selection_arguments(parser) -> None:
     parser.add_argument(
         "--only", nargs="+", default=None, help="仅保留选中结果里的这些 bn（子集收窄）"
     )
+    parser.add_argument(
+        "--lat-extended-three-ml",
+        action="store_true",
+        help="为每个暴跑 LAT Extended + GtBurst + threeML 全流程（非常耗时）",
+    )
 
 
 def cli_main_from_args(args):
@@ -348,7 +353,12 @@ def cli_main_from_args(args):
     from .config import GRBRunOverrides
     from .pipeline import main as pipeline_main
 
-    overrides = GRBRunOverrides(models=list(args.models)) if args.models else None
+    overrides = GRBRunOverrides(
+        models=list(args.models) if args.models else None,
+        lat_three_ml_full=True if getattr(args, "lat_extended_three_ml", False) else None,
+    )
+    if overrides.is_empty():
+        overrides = None
     pipeline_main(
         target_grbs=result.bnnames,
         analysis_mode=args.analysis_mode,
