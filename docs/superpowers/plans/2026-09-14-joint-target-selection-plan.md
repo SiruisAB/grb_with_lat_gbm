@@ -58,33 +58,33 @@
 
 **文件：** 创建 `grb_project/joint_selection.py`；测试 `grb_project/tests/test_joint_selection.py`
 
-- [ ] **步骤 1：编写失败的测试**——fixture 构造 8–10 行交叉表（覆盖：完全就绪、撤回、LLE-only、GBM 缺目录、LAT 缺文件、参数不全、不同年份、不同 TS），断言各判据的选入/排除与排除原因归组。
-- [ ] **步骤 2：运行 `pytest grb_project/tests/test_joint_selection.py -v` 验证失败**（模块不存在）。
-- [ ] **步骤 3：实现** `JointSelectionCriteria`（`year_from/year_to/min_lat_ts/include_lle_only/analysis_mode/verify_on_disk`，frozen dataclass）、`load_joint_target_table()`（必需列校验，缺列报 ValueError 列名）、`select_joint_targets(criteria, *, table, data_dir, lat_root)`（按上文判据顺序，磁盘复核：GBM 目录含 `glg_tte*.fit`；LAT 目录含 `*_EV*/*_PH*/*FT1*` 事件文件与 `*_SC*` 文件）、`JointSelectionResult.to_frame()`（列：bnname, grb_name, year, trigger_met, T0, T1, ra, dec, window_source, lat_ts，按 bnname 排序）。
-- [ ] **步骤 4：测试转绿**；`analysis_mode="gbm"` 与非法模式断言 ValueError。
+- [x] **步骤 1：编写失败的测试**——fixture 构造 8–10 行交叉表（覆盖：完全就绪、撤回、LLE-only、GBM 缺目录、LAT 缺文件、参数不全、不同年份、不同 TS），断言各判据的选入/排除与排除原因归组。
+- [x] **步骤 2：运行 `pytest grb_project/tests/test_joint_selection.py -v` 验证失败**（模块不存在）。
+- [x] **步骤 3：实现** `JointSelectionCriteria`（`year_from/year_to/min_lat_ts/include_lle_only/analysis_mode/verify_on_disk`，frozen dataclass）、`load_joint_target_table()`（必需列校验，缺列报 ValueError 列名）、`select_joint_targets(criteria, *, table, data_dir, lat_root)`（按上文判据顺序，磁盘复核：GBM 目录含 `glg_tte*.fit`；LAT 目录含 `*_EV*/*_PH*/*FT1*` 事件文件与 `*_SC*` 文件）、`JointSelectionResult.to_frame()`（列：bnname, grb_name, year, trigger_met, T0, T1, ra, dec, window_source, lat_ts，按 bnname 排序）。
+- [x] **步骤 4：测试转绿**；`analysis_mode="gbm"` 与非法模式断言 ValueError。
 
 ## 任务 2：CLI 子命令
 
 **文件：** 修改 `grb_project/pipeline.py`；`joint_selection.py` 补 CLI 函数
 
-- [ ] `add_selection_arguments()`：`--year-from/--year-to/--min-lat-ts/--include-lle-only/--analysis-mode{gbm+lat,lat}/--table/--no-verify-on-disk/--output/--grbs-file/--run/--result-root/--summary-csv-name/--session-log/--models`。
-- [ ] `cli_main_from_args()`：打印报告（总数、逐年统计、排除原因、前若干 bn）；`--output` 写选中表 CSV；`--grbs-file` 写 bn 名单（每行一个，可直接 `xargs`）；`--run` 且选中非空时懒导入 `pipeline.main`，`--models` 经 `GRBRunOverrides(models=...)` 透传，其余参数原样交接。
-- [ ] `parse_args` / `cli_main` 增加 `select` 分支（沿用 `download-lat` 的 argv[0] 模式，懒导入）。
-- [ ] 冒烟：`python -m grb_project select --year-from 2008 --year-to 2010` 输出统计；`--run` 分支用 `--help` 与空选择保护（空选择报错退出码 1，不启动分析）。
+- [x] `add_selection_arguments()`：`--year-from/--year-to/--min-lat-ts/--include-lle-only/--analysis-mode{gbm+lat,lat}/--table/--no-verify-on-disk/--output/--grbs-file/--run/--result-root/--summary-csv-name/--session-log/--models`。
+- [x] `cli_main_from_args()`：打印报告（总数、逐年统计、排除原因、前若干 bn）；`--output` 写选中表 CSV；`--grbs-file` 写 bn 名单（每行一个，可直接 `xargs`）；`--run` 且选中非空时懒导入 `pipeline.main`，`--models` 经 `GRBRunOverrides(models=...)` 透传，其余参数原样交接。
+- [x] `parse_args` / `cli_main` 增加 `select` 分支（沿用 `download-lat` 的 argv[0] 模式，懒导入）。
+- [x] 冒烟：`python -m grb_project select --year-from 2008 --year-to 2010` 输出统计；`--run` 分支用 `--help` 与空选择保护（空选择报错退出码 1，不启动分析）。
 
 ## 任务 3：Web 页面
 
 **文件：** 修改 `grb_project/web_app.py`
 
-- [ ] `_run_joint_selection_page(st, base_cfg)`：四控件（起始年/截止年/最小 TS/包含 LLE-only）→ `select_joint_targets`；三个 metric（可选目标/表内总数/被排除数）+ 逐年 `st.bar_chart` + `st.dataframe(to_frame())`；expander 展示排除原因明细；`st.download_button` 导出 CSV；`st.code` 生成等价 CLI 命令。
-- [ ] `main()` 的 radio options 加入「联合目标选择」，与「GBM 数据下载」同样早返回分发。
-- [ ] 页面不加载目录表、不触发分析（批量执行留给 CLI `--run` 或后续任务队列，见「不在本计划」）。
+- [x] `_run_joint_selection_page(st, base_cfg)`：四控件（起始年/截止年/最小 TS/包含 LLE-only）→ `select_joint_targets`；三个 metric（可选目标/表内总数/被排除数）+ 逐年 `st.bar_chart` + `st.dataframe(to_frame())`；expander 展示排除原因明细；`st.download_button` 导出 CSV；`st.code` 生成等价 CLI 命令。
+- [x] `main()` 的 radio options 加入「联合目标选择」，与「GBM 数据下载」同样早返回分发。
+- [x] 页面不加载目录表、不触发分析（批量执行留给 CLI `--run` 或后续任务队列，见「不在本计划」）。
 
 ## 任务 4：文档与提交
 
-- [ ] `说明文档.md`：模块一览表加 `joint_selection.py` 一行；第 8 节 CLI 用法补 `select` 示例。
-- [ ] 全量测试 `pytest grb_project/tests/ -q` 无回归。
-- [ ] 按仓库提交规范单 commit：`feat(selection): 联合分析目标一键选择核心 + CLI/Web 接口`。
+- [x] `说明文档.md`：模块一览表加 `joint_selection.py` 一行；第 8 节 CLI 用法补 `select` 示例。
+- [x] 全量测试 `pytest grb_project/tests/ -q` 无回归。
+- [x] 按仓库提交规范单 commit：`feat(selection): 联合分析目标一键选择核心 + CLI/Web 接口`。
 
 ---
 

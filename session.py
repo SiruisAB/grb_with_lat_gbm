@@ -18,6 +18,7 @@ class AnalysisSessionState:
     summary_csv_name: str = "summary_results.csv"
     log_file_handle: Optional[TextIO] = None
     extended_lat_data_root: str = "/home/mxr/lee/data/fermilat/Extended_data_ex"
+    joint_target_csv: str = "/home/mxr/lee/gbmtest/lat_download_targets.csv"
     copy_extended_lat_to_bn_dir: bool = True
     lat_extended_three_ml_pipeline: bool = False
     default_lat_irfs: str = "p8_transient010e"

@@ -84,6 +84,14 @@ def _build_lat_download_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_selection_parser() -> argparse.ArgumentParser:
+    from .joint_selection import add_selection_arguments
+
+    parser = argparse.ArgumentParser(description="Select GRBs ready for GBM+LAT joint analysis")
+    add_selection_arguments(parser)
+    return parser
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv and argv[0] == "download-gbm":
@@ -97,6 +105,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     if argv and argv[0] == "download-lat":
         args = _build_lat_download_parser().parse_args(argv[1:])
         args.command = "download-lat"
+        return args
+    if argv and argv[0] == "select":
+        args = _build_selection_parser().parse_args(argv[1:])
+        args.command = "select"
         return args
 
     args = _build_analysis_parser().parse_args(argv)
@@ -116,6 +128,10 @@ def cli_main(argv=None):
         return cli_main_from_args(args)
     if args.command == "download-lat":
         from .lat_download import cli_main_from_args
+
+        return cli_main_from_args(args)
+    if args.command == "select":
+        from .joint_selection import cli_main_from_args
 
         return cli_main_from_args(args)
 

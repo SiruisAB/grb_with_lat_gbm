@@ -1239,6 +1239,71 @@ def _run_special_burst_page(
     )
 
 
+def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
+    from grb_project.joint_selection import JointSelectionCriteria, select_joint_targets
+
+    st.subheader("联合目标选择")
+    st.caption(
+        "以 lat_download_targets.csv 交叉表（GBM 目录 × 2FLGC × LLE × GCN）加磁盘实况为准，"
+        "一键筛出可做 GBM+LAT 联合分析的暴；排除原因逐项可查。"
+    )
+    col_from, col_to, col_ts, col_lle = st.columns(4)
+    year_from = int(col_from.number_input("起始年份（含）", min_value=2008, max_value=2100, value=2008, step=1))
+    year_to = int(col_to.number_input("截止年份（含）", min_value=2008, max_value=2100, value=2026, step=1))
+    min_ts_raw = float(
+        col_ts.number_input("最小 LAT TS（0 = 不限）", min_value=0.0, max_value=100000.0, value=0.0, step=1.0)
+    )
+    include_lle = bool(col_lle.checkbox("包含 LLE-only 暴"))
+
+    criteria = JointSelectionCriteria(
+        year_from=year_from,
+        year_to=year_to,
+        min_lat_ts=(min_ts_raw if min_ts_raw > 0 else None),
+        include_lle_only=include_lle,
+        analysis_mode="gbm+lat",
+    )
+    try:
+        result = select_joint_targets(criteria)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"选择失败：{exc}")
+        return
+
+    metric_targets, metric_excluded, metric_total = st.columns(3)
+    metric_targets.metric("可选目标", len(result.targets))
+    metric_excluded.metric("被排除", result.excluded_total())
+    metric_total.metric("表内总行数", len(result.targets) + result.excluded_total())
+
+    df = result.to_frame()
+    if not df.empty:
+        st.bar_chart(df["year"].value_counts().sort_index())
+    st.dataframe(df, use_container_width=True)
+
+    with st.expander("排除原因明细", expanded=False):
+        if result.excluded:
+            for reason in sorted(result.excluded):
+                names = result.excluded[reason]
+                preview = "、".join(names[:8]) + ("…" if len(names) > 8 else "")
+                st.write(f"- **{reason}**：{len(names)} 个（{preview}）")
+        else:
+            st.write("无排除记录。")
+
+    st.download_button(
+        "导出选中目标 CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name=f"joint_targets_{year_from}_{year_to}.csv",
+        mime="text/csv",
+        disabled=df.empty,
+    )
+    cmd = (
+        f"python -m grb_project select --year-from {year_from} --year-to {year_to}"
+        + (f" --min-lat-ts {min_ts_raw:g}" if min_ts_raw > 0 else "")
+        + (" --include-lle-only" if include_lle else "")
+        + " --run"
+    )
+    st.caption("等价 CLI（加 --run 可直接启动批量联合分析）：")
+    st.code(cmd, language="bash")
+
+
 def main() -> None:
     import streamlit as st
 
@@ -1248,12 +1313,19 @@ def main() -> None:
 
     base_cfg = GRBProjectConfig()
     st.sidebar.header("页面切换")
-    page = st.sidebar.radio("页面", options=["单次分析", "光变曲线", "特殊暴分 bin", "GBM 数据下载"], index=0)
+    page = st.sidebar.radio(
+        "页面",
+        options=["单次分析", "光变曲线", "特殊暴分 bin", "GBM 数据下载", "联合目标选择"],
+        index=0,
+    )
     st.sidebar.markdown("---")
     st.sidebar.caption("分析、光变曲线和下载页面共用项目内后端流程。")
 
     if page == "GBM 数据下载":
         _run_gbm_download_page(st=st, base_cfg=base_cfg)
+        return
+    if page == "联合目标选择":
+        _run_joint_selection_page(st=st, base_cfg=base_cfg)
         return
     try:
         df_catalog = _load_catalog(base_cfg)
