@@ -64,11 +64,14 @@ DEFAULT_BACKGROUND_HIGH = "350-400"
 SPECIAL_BURSTS_YAML = Path(__file__).with_name("special_bursts.yaml")
 SUPPORTED_MODELS = (
     "band",
+    "band_wide",
     "comp",
     "blackbody",
     "NDP",
     "pl",
     "SBPL",
+    "2SBPL",
+    "2SBPL_syn",
     "band+bb",
     "mbb",
     "band+mbb",
@@ -112,7 +115,18 @@ def _default_target(df: pd.DataFrame) -> str:
 
 
 def _safe_text(value: object, default: str = "") -> str:
-    text = str(value).strip() if value is not None else ""
+    # 目录表里缺值是 NaN，而 str(float("nan")) == "nan" 是非空字符串，直接 `or default`
+    # 兜不住，会把字面量 "nan" 当成真值一路传下去（GRB260208A 的本底窗就是这样变成
+    # "nan-nan,nan-nan" 的）。所以 NaN/NaT 必须先判掉。
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        # pd.isna 对数组/列表会返回数组或抛歧义错误，这类值走下面的字符串逻辑
+        pass
+    text = str(value).strip()
     return text or default
 
 
@@ -316,16 +330,14 @@ def _background_defaults(catalog_row: pd.Series, lat_row: Optional[pd.Series], t
             parsed = [item.strip() for item in str(special_cfg.get("background_interval")).split(",") if item.strip()]
             if len(parsed) >= 2:
                 return parsed[0], parsed[1]
-    low_start = _safe_text(catalog_row.get("back_interval_low_start"), DEFAULT_BACKGROUND_LOW.split("-")[0])
-    low_stop = _safe_text(catalog_row.get("back_interval_low_stop"), DEFAULT_BACKGROUND_LOW.split("-")[-1])
-    high_start = _safe_text(catalog_row.get("back_interval_high_start"), DEFAULT_BACKGROUND_HIGH.split("-")[0])
-    high_stop = _safe_text(catalog_row.get("back_interval_high_stop"), DEFAULT_BACKGROUND_HIGH.split("-")[-1])
-    low = f"{low_start}-{low_stop}"
-    high = f"{high_start}-{high_stop}"
-    if low == "-":
-        low = DEFAULT_BACKGROUND_LOW
-    if high == "-":
-        high = DEFAULT_BACKGROUND_HIGH
+    # 四个端点任缺其一就退回整段默认窗。原先按端点拆默认值是错的：
+    # "-24--5".split("-") == ['', '24', '', '5']，[0]/[-1] 拼出来是 "-5" 而不是 "-24--5"。
+    low_start = _safe_text(catalog_row.get("back_interval_low_start"))
+    low_stop = _safe_text(catalog_row.get("back_interval_low_stop"))
+    high_start = _safe_text(catalog_row.get("back_interval_high_start"))
+    high_stop = _safe_text(catalog_row.get("back_interval_high_stop"))
+    low = f"{low_start}-{low_stop}" if low_start and low_stop else DEFAULT_BACKGROUND_LOW
+    high = f"{high_start}-{high_stop}" if high_start and high_stop else DEFAULT_BACKGROUND_HIGH
     return low, high
 
 
