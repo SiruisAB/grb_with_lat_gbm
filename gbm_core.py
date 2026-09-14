@@ -308,6 +308,28 @@ def _build_gbm_plugin_for_detector(
         log(f"警告: 探测器 {det} 的本底区间为空，跳过")
         return None
 
+    # 目录表新暴常缺 back_interval_* 四列，拼出的 "nan-nan" 能过上面的非空检查，却会让
+    # threeML 的 TimeIntervalSet 正则匹配返回 None，最终抛 AttributeError: 'NoneType'
+    # object has no attribute 'groups'——报错点离真正的原因太远。这里先用 threeML 自己的
+    # 解析器验一遍，把问题挡在插件构建之前并给出可操作的提示。
+    try:
+        from threeML.utils.time_interval import TimeIntervalSet
+    except Exception as exc:  # noqa: BLE001
+        # 拿不到解析器就只跳过预校验，绝不能因此判定区间非法——否则合法本底窗也会被拒。
+        log(f"提示: 无法导入 TimeIntervalSet（{exc}），跳过本底区间预校验")
+    else:
+        try:
+            TimeIntervalSet.from_strings(*background_parts)
+        except Exception as exc:  # noqa: BLE001
+            log(
+                f"警告: 探测器 {det} 的本底区间 {background_parts} 无法解析（"
+                f"{type(exc).__name__}: {exc}），跳过。常见原因是目录表缺 "
+                "back_interval_low_start/stop、back_interval_high_start/stop 四列；"
+                "可在界面里手填本底窗，或在 special_bursts.yaml 中为该暴指定 "
+                "background_interval 后重跑。"
+            )
+            return None
+
     work_dir = Path(output_dir or grb_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     cwd = os.getcwd()
