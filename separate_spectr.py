@@ -70,6 +70,7 @@ try:
         Powerlaw,
         Uniform_prior,
         NonDissipativePhotosphere,
+        DoubleSmoothlyBrokenPowerlaw,
         SmoothlyBrokenPowerLaw,
     )
 except ImportError:  # pragma: no cover - optional dependency in redraw-only environments
@@ -1303,6 +1304,29 @@ def discrete_spectr(
         modelTotal=model1
         model_str1='Band'
 
+
+    if model_str in ('2SBPL', '2SBPL_syn'):
+        # Doubly smoothly broken power law. The free-parameter order differs
+        # between the two variants because 2SBPL_syn holds alpha1 and alpha2
+        # fixed at the fast-cooling synchrotron values, so they are absent from
+        # the fitted-parameter vector.
+        model1 = DoubleSmoothlyBrokenPowerlaw(piv=1E2)
+        model1.beta.min_value, model1.beta.max_value = -5.0, -1.6
+        _lo, _hi = _energy_bounds_for_mode(analysis_mode)
+        model1.xp.min_value, model1.xp.max_value = _lo, _hi
+        model1.xb.min_value, model1.xb.max_value = _lo, min(1.0e4, _hi)
+        if model_str == '2SBPL_syn':
+            model1.alpha1.value = -2.0 / 3.0
+            model1.alpha2.value = -1.5
+            model1.K, model1.xb, model1.xp, model1.beta = parameter_values[:4]
+        else:
+            model1.alpha1.min_value, model1.alpha1.max_value = -1.5, 1.0
+            model1.alpha2.min_value, model1.alpha2.max_value = -3.0, -0.5
+            (model1.K, model1.alpha1, model1.xb,
+             model1.alpha2, model1.xp, model1.beta) = parameter_values[:6]
+        modelTotal = model1
+        model_str1 = model_str
+
     if model_str == 'SBPL':
         # SBPL: K, alpha, break_energy, beta（与 modelbuild.py 的自由参数顺序一致）。
         # break_scale 与 pivot 拟合时都不放开，这里沿用 SmoothlyBrokenPowerLaw 的
@@ -1924,7 +1948,7 @@ def discrete_spectr(
         xs1 = np.logspace(5.0,np.log10(emax),100)
         xs=np.append(xs, xs1[1:])
     fluxPL = k0*xs*xs*modelTotal(xs)
-    if model_str in ['pl','band','blackbody','comp','SBPL','NDP','mbb']:
+    if model_str in ['pl','band','blackbody','comp','SBPL','NDP','mbb','2SBPL','2SBPL_syn']:
         plt.loglog(xs,k0*xs*xs*modelTotal(xs),'-',linewidth=2,label=model_str1, color='b')
         if model_str in ['blackbody']:
             Epeak = 3.92*parameter_values[1]
@@ -1951,6 +1975,12 @@ def discrete_spectr(
         #     Epeak = parameter_values[2]  # 直接用 Ep 作为峰值能量
         #     fluxEpeak = max(k0*xs*xs*modelTotal(xs))
         #     flux100mev = fluxPL[np.where( xs == 100000.0)]
+        elif model_str in ['2SBPL', '2SBPL_syn']:
+            # the nuFnu peak of the 2SBPL is the fitted xp; its index in the
+            # free-parameter vector depends on whether alpha1/alpha2 are fixed
+            Epeak = parameter_values[2] if model_str == '2SBPL_syn' else parameter_values[4]
+            fluxEpeak = max(k0*xs*xs*modelTotal(xs))
+            flux100mev = fluxPL[np.where( xs == 100000.0)]
         elif model_str in ['SBPL']:
             # 自由参数顺序是 K, alpha, break_energy, beta，转折能量在第 2 位；
             # 原先写的 [3] 是 beta（负数）。

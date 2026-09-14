@@ -3,6 +3,7 @@
 # ==========================
 from astromodels import (
     Band,
+    DoubleSmoothlyBrokenPowerlaw,
     Blackbody,
     Cutoff_powerlaw,
     Function1D,
@@ -178,6 +179,40 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         # 设置参数边界以避免采样问题
         m.alpha.min_value, m.alpha.max_value = -1.5, 2.0
         m.beta.min_value, m.beta.max_value = -5, -1.6
+        _set_energy_prior(m.xp, energy_bounds)
+
+    elif mstr == "band_wide":
+        # 与 "band" 同一个 Band 函数，只放宽 alpha/beta 的先验和硬边界。
+        #
+        # 起因：GRB260616A 的 beta 落在 -1.600044 +- 0.0013，GRB260708A 落在
+        # -4.999788 +- 0.0144，GRB260411B 落在 -4.995800 +- 0.0727——正好是上面
+        # "band" 分支里写死的 [-5, -1.6] 两端，误差还小到 1e-3 量级。那不是数据
+        # 给出的值，是被边界截断的值。GRB260616A 的 Flux 因此虚高约 40 倍
+        # (beta=-1.6 时 nuFnu 高能端不回落，8 keV-100 GeV 的积分被外推撑大)。
+        #
+        # 新边界的取法：
+        #   beta 下限 -10  —— 与本文件 SBPL 分支 (m.beta.min_value = -10) 一致，
+        #                     不另造一个数；
+        #   beta 上限 -1.2 —— 只放到 -1.5 的话 GRB260616A 极可能直接重新顶在
+        #                     -1.5 上，等于没测出东西；-1.2 留出真实余量，且该暴
+        #                     alpha≈-0.34，beta<alpha 仍然成立。
+        #   alpha [-2, 2]  —— 顺带修掉原 "band" 分支的一处不一致：那里
+        #                     alpha.prior 上界是 1.0 而 alpha.max_value 是 2.0，
+        #                     贝叶斯拟合下生效的是先验，所以 2.0 从来没起过作用。
+        #                     这里先验与硬边界写成同一组值。
+        #
+        # xp 不动：它走 _set_energy_prior，gbm+lat 下已经是 8 keV-1e8 keV，
+        # GRB260708A 的 11.6 MeV、GRB260411B 的 17.3 MeV 是没被约束住而不是被截断，
+        # 收紧或放宽 xp 都不是这里要回答的问题。
+        m = Band(piv=1E2)
+        parameters = [1E-4, -1.0, 500.0, -2.0]
+        m.K.prior = Log_uniform_prior(lower_bound=parameters[0]*1E-3, upper_bound=1E1)
+        m.alpha.prior = Uniform_prior(lower_bound=-2.0, upper_bound=2.0)
+        m.beta.prior = Uniform_prior(lower_bound=-10.0, upper_bound=-1.2)
+
+        m.K, m.alpha, m.xp, m.beta = parameters[0], parameters[1], parameters[2], parameters[3]
+        m.alpha.min_value, m.alpha.max_value = -2.0, 2.0
+        m.beta.min_value, m.beta.max_value = -10.0, -1.2
         _set_energy_prior(m.xp, energy_bounds)
 
     elif mstr == "comp":
@@ -472,6 +507,51 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
     #     csbpl.beta.value = 2.0
     #     csbpl.gamma.value = -2.3
     
+
+    elif mstr in ("2SBPL", "2SBPL_syn"):
+        # Doubly smoothly broken power law (Ravasio et al. 2018, A&A 613, A16).
+        # alpha1 applies below the cooling break xb, alpha2 between xb and the
+        # nuFnu peak xp, and beta above xp. The two curvature parameters n1 and
+        # n2 stay fixed at their defaults, as in the reference implementation.
+        m = DoubleSmoothlyBrokenPowerlaw(piv=1E2)
+        synchrotron = (mstr == "2SBPL_syn")
+
+        m.K.prior = Log_uniform_prior(lower_bound=1E-7, upper_bound=1E1)
+        m.K.value = 1E-2
+        m.K.min_value, m.K.max_value = 1e-12, 1e3
+
+        # xb is the cooling break and is expected well below the peak; keeping
+        # its prior below the xp prior avoids the label-swapping degeneracy that
+        # arises if both breaks may occupy the same range.
+        _set_energy_prior(m.xp, energy_bounds)
+        m.xp.value = 300.0
+        xb_upper = min(1.0e4, float(energy_bounds[1]))
+        m.xb.min_value, m.xb.max_value = float(energy_bounds[0]), xb_upper
+        m.xb.prior = Log_uniform_prior(
+            lower_bound=float(energy_bounds[0]), upper_bound=xb_upper
+        )
+        m.xb.value = 100.0
+
+        m.beta.prior = Uniform_prior(lower_bound=-5.0, upper_bound=-1.6)
+        m.beta.min_value, m.beta.max_value = -5.0, -1.6
+        m.beta.value = -2.5
+
+        if synchrotron:
+            # fast-cooling synchrotron: alpha1 = -2/3 below the cooling break,
+            # alpha2 = -3/2 above it. Both held fixed, leaving four free
+            # parameters (K, xb, xp, beta), the same number as Band.
+            m.alpha1.value = -2.0 / 3.0
+            m.alpha2.value = -1.5
+            m.alpha1.fix = True
+            m.alpha2.fix = True
+        else:
+            m.alpha1.prior = Uniform_prior(lower_bound=-1.5, upper_bound=1.0)
+            m.alpha1.min_value, m.alpha1.max_value = -1.5, 1.0
+            m.alpha1.value = -2.0 / 3.0
+            m.alpha2.prior = Uniform_prior(lower_bound=-3.0, upper_bound=-0.5)
+            m.alpha2.min_value, m.alpha2.max_value = -3.0, -0.5
+            m.alpha2.value = -1.5
+
     else:
         raise ValueError(f"未知模型类型: {mstr}")
     # return m
