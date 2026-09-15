@@ -76,5 +76,37 @@ class BuildJointBatchCommandTests(unittest.TestCase):
         self.assertIn("--session-log", cmd)
 
 
+class JointBatchPidAliveTests(unittest.TestCase):
+    def test_nonexistent_pid_is_dead(self):
+        from grb_project.web_app import _joint_batch_pid_alive
+
+        self.assertFalse(_joint_batch_pid_alive(999999999))
+
+    def test_self_pid_is_alive(self):
+        import os
+
+        from grb_project.web_app import _joint_batch_pid_alive
+
+        self.assertTrue(_joint_batch_pid_alive(os.getpid()))
+
+    def test_zombie_pid_is_dead(self):
+        import os
+        import time
+
+        from grb_project.web_app import _joint_batch_pid_alive
+
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        try:
+            # fork 到子进程真正进入 Z 状态有微秒级窗口，稍等它完成退出
+            deadline = time.time() + 2.0
+            while time.time() < deadline and _joint_batch_pid_alive(pid):
+                time.sleep(0.01)
+            self.assertFalse(_joint_batch_pid_alive(pid))
+        finally:
+            os.waitpid(pid, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

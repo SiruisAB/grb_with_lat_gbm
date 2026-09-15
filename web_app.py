@@ -1263,7 +1263,15 @@ def _joint_batch_pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    # kill(pid, 0) 对僵尸进程同样成功：被停掉的批量任务在父进程（Streamlit
+    # 服务）回收之前会以 Z 状态留在进程表里，页面会一直误报"运行中"。
+    # 读 /proc/<pid>/stat 的状态位，Z 视为已结束。
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        state = stat_text.rsplit(")", 1)[1].split()[0]
+        return state != "Z"
+    except (OSError, IndexError):
+        return True  # 拿不到 /proc 时退回 kill(0) 的结论
 
 
 def _build_joint_batch_command(
