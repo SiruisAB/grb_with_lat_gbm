@@ -78,6 +78,29 @@ def _find_lat_files(lat_data_dir: str, bnname: str) -> Tuple[Optional[str], Opti
     return ft1_file, ft2_file
 
 
+def _gtselect_output_has_events(gtselect_outfile: str) -> bool:
+    """检查 gtselect 输出里 GTI 与 EVENTS 是否非空。
+
+    LAT 辐射窗晚于分析 bin 的暴（2FLGC 里 T0 可到数千秒）在 prompt bin
+    里选出 0 个事件，GTI 为空——这是科学上正常的情况，应优雅跳过；
+    不检查的话会一路走到 gtrspgen 才以难看的异常链失败。
+    """
+    try:
+        from astropy.io import fits as pyfits
+
+        with pyfits.open(gtselect_outfile) as hdul:
+            for hdu in hdul:
+                if hdu.name == "GTI" and int(hdu.header.get("NAXIS2", 0)) == 0:
+                    return False
+            events = next((h for h in hdul if h.name == "EVENTS"), None)
+            if events is None or int(events.header.get("NAXIS2", 0)) == 0:
+                return False
+        return True
+    except Exception:  # noqa: BLE001
+        # 检查本身失败时不拦截，让后续工具报出真正的错误
+        return True
+
+
 def _configure_gtselect_filter(t0: float, t1: float, trig_time: float, ra: float, dec: float, ft1_file: str, out_dir: str) -> str:
     if my_apps is None:
         raise ModuleNotFoundError("threeML/gt_apps 未安装")
@@ -150,20 +173,74 @@ def _generate_lat_response(ft2_file: str, pha_file: str) -> str:
     return rsp_file
 
 
+def _lookup_lat_target_info(bnname: str) -> Optional[dict]:
+    """按 bnname 取 LAT 目标信息（grb_name / trigger_met / ra / dec）。
+
+    先查 fermilat-grb.xls 的 GCN 精选表（2022+ 手工维护，原行为）；
+    查不到再退回联合目标交叉表 lat_download_targets.csv——它覆盖全部
+    已下载 LAT 数据的暴（2008 起），批量的旧暴此前在这里 KeyError，
+    导致 LAT 插件建不起来、拟合静默降级为 GBM-only。
+    """
+    try:
+        df = pd.read_excel(session.fermilat_grb_xls, sheet_name="GCN", index_col="trigname")
+        row = df.loc[bnname]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        grb_name = re.sub(r"\s+", "", str(row["gcn_name"]))
+        trig_time = float(row["trigger_met"])
+        ra_str, dec_str = str(row["ra,dec"]).split(",")
+        return {
+            "grb_name": grb_name,
+            "trigger_met": trig_time,
+            "ra": float(ra_str),
+            "dec": float(dec_str),
+        }
+    except KeyError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        log(f"提示: fermilat-grb.xls 读取失败（{exc}），改查联合目标交叉表")
+
+    csv_path = getattr(session, "joint_target_csv", None)
+    if not csv_path:
+        return None
+    try:
+        table = pd.read_csv(csv_path)
+    except Exception as exc:  # noqa: BLE001
+        log(f"警告: 联合目标交叉表读取失败: {exc}")
+        return None
+    rows = table[table["bnname"].astype(str).str.strip().str.lower() == str(bnname).strip().lower()]
+    if rows.empty:
+        return None
+    r = rows.iloc[0]
+    met = pd.to_numeric(r.get("trigger_met"), errors="coerce")
+    ra = pd.to_numeric(r.get("ra"), errors="coerce")
+    dec = pd.to_numeric(r.get("dec"), errors="coerce")
+    if pd.isna(met) or pd.isna(ra) or pd.isna(dec):
+        return None
+    return {
+        "grb_name": str(r["grb_name"]).strip(),
+        "trigger_met": float(met),
+        "ra": float(ra),
+        "dec": float(dec),
+    }
+
+
 def process_lat_data(bnname: str, t0: float, t1: float, _result_dir: str) -> Optional[OGIPLike]:
     if my_apps is None:
         log("警告: threeML/gt_apps 不可用，跳过 LAT 处理")
         return None
     try:
         log(f"开始处理LAT数据: {bnname}")
-        df = pd.read_excel(session.fermilat_grb_xls, sheet_name="GCN", index_col="trigname")
-        row = df.loc[bnname]
-        if isinstance(row, pd.DataFrame):
-            row = row.iloc[0]
-        grb_name = re.sub(r"\s+", "", row["gcn_name"])
-        trig_time = float(row["trigger_met"])
-        ra_str, dec_str = row["ra,dec"].split(",")
-        ra, dec = float(ra_str), float(dec_str)
+        info = _lookup_lat_target_info(bnname)
+        if info is None:
+            log(
+                f"警告: 未找到 {bnname} 的 LAT 目标信息"
+                "（fermilat-grb.xls 与联合目标交叉表均无该暴），跳过 LAT 处理"
+            )
+            return None
+        grb_name = info["grb_name"]
+        trig_time = info["trigger_met"]
+        ra, dec = info["ra"], info["dec"]
         lat_data_dir = _resolve_lat_data_dir(grb_name)
         if not os.path.exists(lat_data_dir):
             log(f"警告: LAT数据目录不存在: {lat_data_dir}")
@@ -178,6 +255,12 @@ def process_lat_data(bnname: str, t0: float, t1: float, _result_dir: str) -> Opt
         os.chdir(result_dir)
         try:
             gtselect_outfile = _configure_gtselect_filter(t0=t0, t1=t1, trig_time=trig_time, ra=ra, dec=dec, ft1_file=ft1_file, out_dir=result_dir)
+            if not _gtselect_output_has_events(gtselect_outfile):
+                log(
+                    f"{bnname}: bin [{t0:g}, {t1:g}] 内没有 LAT 事件"
+                    "（LAT 辐射窗与分析 bin 不重叠），跳过 LAT 插件"
+                )
+                return None
             pha_file = _configure_gtbin_counts_map(ft2_file=ft2_file, evfile=gtselect_outfile)
             rsp_file = _generate_lat_response(ft2_file=ft2_file, pha_file=pha_file)
         finally:
