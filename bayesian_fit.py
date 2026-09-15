@@ -70,6 +70,7 @@ def _run_bayesian_analysis_for_model(
     bin_end: float,
     duration: float,
     analysis_mode: str,
+    requested_analysis_mode: Optional[str] = None,
     plot_style: Optional[dict] = None,
 ) -> Dict:
     from astromodels import Blackbody
@@ -93,6 +94,9 @@ def _run_bayesian_analysis_for_model(
 
     log_marginal_likelihood = bs.sampler.log_marginal_likelihood
     suffix = "gbm_lat" if "lat" in analysis_mode.lower() else "gbm"
+    # 绘图能量上限按"请求模式"统一：降级为 GBM-only 的 bin 图也画到 1e8 keV；
+    # 文件名 suffix 与拟合先验仍按实际拟合（fit_mode）如实走。
+    plot_mode = str(requested_analysis_mode or analysis_mode)
 
     corner_fig = bs.results.corner_plot()
     corner_fig_path = os.path.join(result_dir, f"bs_{bnname}_{model_str}_{bin_start}-{bin_end}_{suffix}_corner_plot.png")
@@ -144,7 +148,7 @@ def _run_bayesian_analysis_for_model(
         logg.error("警告: 绘制频谱图失败: %s", exc)
 
     try:
-        sed_ene_max = 100 * u.GeV if "lat" in analysis_mode.lower() else 100 * u.MeV
+        sed_ene_max = 100 * u.GeV if "lat" in plot_mode.lower() else 100 * u.MeV
         fig_sed = plot_spectra(
             bs.results,
             ene_min=1 * u.keV,
@@ -173,7 +177,7 @@ def _run_bayesian_analysis_for_model(
             gbm_detectors=dets,
             bin_start=bin_start,
             bin_end=bin_end,
-            analysis_mode=analysis_mode,
+            analysis_mode=plot_mode,
             output_dir=fluxdata_dir,
             plot_style=plot_style,
         )

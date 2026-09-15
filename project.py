@@ -744,6 +744,7 @@ def _run_gbm_analysis(
                     "bin_end": bin_end,
                     "duration": duration,
                     "analysis_mode": fit_mode,
+                    "requested_analysis_mode": str(analysis_mode),
                     "plot_style": plot_style,
                 }
             )

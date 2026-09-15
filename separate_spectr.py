@@ -1227,6 +1227,13 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
+def _plot_emax_kev(analysis_mode: str) -> float:
+    """绘图能量上限：请求模式含 lat 统一 1e8 keV；GBM-only 模式 1e5 keV。"""
+    if "lat" in str(analysis_mode or "").lower():
+        return 1e8
+    return 1e5
+
+
 def _widen_parameter_bounds(parameter, lower, upper) -> None:
     """把一个参数的硬边界放宽到至少覆盖 [lower, upper]，只放宽、不收紧。
 
@@ -1294,12 +1301,16 @@ def discrete_spectr(
         modelTotal=model1
         model_str1='comp'
 
-    if  model_str == 'band':
+    if model_str in ('band', 'band_wide'):
+        # band_wide 与 band 是同一个 Band 函数（modelbuild 仅放宽了先验/硬边界），
+        # 自由参数顺序一致，出图等价。
         model1 = Band(piv=1E2)
-        # model1.alpha.min_value = -2.0    # 改硬边界
-        # model1.alpha.max_value =  5.0
-        # model1.xp.min_value,model1.xp.max_value = 1.0, 1e8
         _widen_parameter_bounds(model1.xp, *_energy_bounds_for_mode(analysis_mode))
+        if model_str == 'band_wide':
+            # 与 modelbuild 的 band_wide 先验一致：alpha [-2,2]、beta [-10,-1.2]。
+            # 出图模型的边界不得窄于拟合先验，否则拟合取到边界值时曲线被截断。
+            _widen_parameter_bounds(model1.alpha, -2.0, 2.0)
+            _widen_parameter_bounds(model1.beta, -10.0, -1.2)
         model1.K ,model1.alpha,model1.xp ,model1.beta = parameter_values[:4]
         modelTotal=model1
         model_str1='Band'
@@ -1935,11 +1946,10 @@ def discrete_spectr(
         
 
 
-    # 能量上限：GBM-only 用 1e5 keV（100 MeV），GBM+LAT 扩展到 1e8 keV（100 GeV）
-    if "lat" in analysis_mode.lower() and lat is not None:
-        emax = 1e8
-    else:
-        emax = 1e5
+    # 能量上限按"请求模式"统一：本 bin 因无 LAT 事件降级为 GBM-only 拟合时，
+    # 坐标上限也保持 1e8 keV——高能段是展示性外推；拟合先验与通量积分仍按
+    # 实际接入的数据走（bayesian_fit 按 fit_mode 判定，文件名 suffix 亦如实）。
+    emax = _plot_emax_kev(analysis_mode)
     xs = np.logspace(np.log10(8.),5.0,100)
     if emax > 1e5:
         # 仅在 GBM+LAT 模式下才需要向 100 MeV 以上延伸。GBM-only 时
@@ -1948,7 +1958,7 @@ def discrete_spectr(
         xs1 = np.logspace(5.0,np.log10(emax),100)
         xs=np.append(xs, xs1[1:])
     fluxPL = k0*xs*xs*modelTotal(xs)
-    if model_str in ['pl','band','blackbody','comp','SBPL','NDP','mbb','2SBPL','2SBPL_syn']:
+    if model_str in ['pl','band','band_wide','blackbody','comp','SBPL','NDP','mbb','2SBPL','2SBPL_syn']:
         plt.loglog(xs,k0*xs*xs*modelTotal(xs),'-',linewidth=2,label=model_str1, color='b')
         if model_str in ['blackbody']:
             Epeak = 3.92*parameter_values[1]
@@ -2080,7 +2090,7 @@ def discrete_spectr(
     plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.1, k0*max(xs*xs*modelTotal(xs))*500.0])
     if model_str == 'pl':
         plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.1, k0*max(xs*xs*modelTotal(xs))*500.0])
-    if model_str == 'band':
+    if model_str in ('band', 'band_wide'):
         plt.ylim([k0*min(xs*xs*modelTotal(xs))*0.1, k0*max(xs*xs*modelTotal(xs))*500.0])
     if model_str == 'comp':
         xc=parameter_values[2]
