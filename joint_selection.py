@@ -9,7 +9,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import signal
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -291,6 +295,98 @@ def restrict_result_targets(
     )
 
 
+def joint_batch_state_path() -> Path:
+    return Path(session.joint_batch_run_state_file).expanduser()
+
+
+def joint_batch_stop_flag_path() -> Path:
+    return Path(session.stop_flag_file).expanduser()
+
+
+def read_running_batch() -> Optional[dict]:
+    path = joint_batch_state_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def batch_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # kill(pid, 0) 对僵尸进程同样成功（父进程未回收时以 Z 状态留在进程表），
+    # 读 /proc/<pid>/stat 的状态位，Z 视为已结束。
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        state = stat_text.rsplit(")", 1)[1].split()[0]
+        return state != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def clear_batch_stop_flag() -> None:
+    joint_batch_stop_flag_path().unlink(missing_ok=True)
+
+
+def request_batch_stop() -> dict:
+    """优雅停止：写 stop flag，批量进程完成当前暴后自行退出。"""
+    state = read_running_batch()
+    if not state or not batch_pid_alive(int(state.get("pid", 0))):
+        raise RuntimeError("没有运行中的批量任务")
+    joint_batch_stop_flag_path().write_text(
+        json.dumps(
+            {"requested": time.strftime("%Y-%m-%d %H:%M:%S"), "pid": state["pid"]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state["stop_requested"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    joint_batch_state_path().write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return state
+
+
+def force_stop_batch() -> dict:
+    """强制停止：SIGKILL。
+
+    仅当目标本身是进程组长（Web 启动器用 start_new_session 保证）才杀整组，
+    否则只杀单个进程——避免误杀手工启动批次所在终端的整个进程组。
+    """
+    state = read_running_batch()
+    if not state:
+        raise RuntimeError("没有批量任务记录")
+    pid = int(state.get("pid", 0))
+    killed = False
+    if pid and batch_pid_alive(pid):
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+            killed = True
+        except OSError as exc:
+            raise RuntimeError(f"强制停止失败（PID {pid}）: {exc}") from exc
+    clear_batch_stop_flag()
+    # 进程已结束时不得谎报"已强制停止"——只如实记录真正发生的 kill
+    if killed:
+        state["stop_requested"] = None
+        state["force_stopped"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        state.pop("force_stopped", None)
+    state["kill_attempted"] = killed
+    joint_batch_state_path().write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return state
+
+
 def add_selection_arguments(parser) -> None:
     parser.add_argument("--year-from", type=int, default=None, help="起始年份（含）")
     parser.add_argument("--year-to", type=int, default=None, help="截止年份（含）")
@@ -316,6 +412,16 @@ def add_selection_arguments(parser) -> None:
         "--only", nargs="+", default=None, help="仅保留选中结果里的这些 bn（子集收窄）"
     )
     parser.add_argument(
+        "--stop-running",
+        action="store_true",
+        help="请求运行中的批量分析优雅停止（完成当前暴后退出）",
+    )
+    parser.add_argument(
+        "--force-stop-running",
+        action="store_true",
+        help="强制停止运行中的批量分析（SIGKILL 进程组）",
+    )
+    parser.add_argument(
         "--lat-extended-three-ml",
         action="store_true",
         help="为每个暴跑 LAT Extended + GtBurst + threeML 全流程（非常耗时）",
@@ -323,6 +429,22 @@ def add_selection_arguments(parser) -> None:
 
 
 def cli_main_from_args(args):
+    if args.stop_running or args.force_stop_running:
+        try:
+            if args.force_stop_running:
+                state = force_stop_batch()
+                if state.get("kill_attempted"):
+                    print(f"已强制停止批量任务（PID {state.get('pid')}）")
+                else:
+                    print(f"批量任务（PID {state.get('pid')}）已结束，无需强制停止")
+            else:
+                state = request_batch_stop()
+                print(f"已请求停止批量任务（PID {state.get('pid')}），完成当前暴后退出")
+        except RuntimeError as exc:
+            print(str(exc))
+            return 1
+        return 0
+
     criteria = JointSelectionCriteria(
         year_from=args.year_from,
         year_to=args.year_to,
@@ -352,6 +474,8 @@ def cli_main_from_args(args):
 
     from .config import GRBRunOverrides
     from .pipeline import main as pipeline_main
+
+    clear_batch_stop_flag()
 
     overrides = GRBRunOverrides(
         models=list(args.models) if args.models else None,

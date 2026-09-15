@@ -848,6 +848,7 @@ def run_single_analysis(
         _determine_time_interval_and_position,
     )
     from .io_utils import read_catalog
+    from .session import AnalysisCancelled, check_stop_requested
     from .logging_utils import log
     from .special_bursts import _load_special_burst_config
     from .summary_export import (
@@ -887,6 +888,11 @@ def run_single_analysis(
     models = _default_model_list(project_config, run_overrides)
     parallel_models, model_workers = _parallel_model_settings(project_config, run_overrides)
     for target in target_list:
+        try:
+            check_stop_requested()
+        except AnalysisCancelled as stop_exc:
+            log(f"批量分析停止请求生效，已完成 {len(summary_rows)} 行结果，跳过剩余目标: {stop_exc}")
+            break
         try:
             catalog_row = _lookup_catalog_row(catalog_by_bn if target in catalog_by_bn.index else catalog, target)
         except KeyError as exc:

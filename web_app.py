@@ -48,6 +48,14 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from grb_project.config import GRBProjectConfig, GRBRunOverrides
+from grb_project.joint_selection import (
+    batch_pid_alive,
+    clear_batch_stop_flag,
+    force_stop_batch,
+    joint_batch_state_path,
+    read_running_batch,
+    request_batch_stop,
+)
 from grb_project import gbm_download, lat_download, lat_gcn_extract
 from grb_project.io_utils import load_lat_catalog
 from grb_project.project import GRBProject, _build_result_metadata, run_joint_lightcurve
@@ -1242,38 +1250,6 @@ def _run_special_burst_page(
     )
 
 
-def _joint_batch_run_state_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "joint_batch_run.json"
-
-
-def _read_joint_batch_run_state() -> Optional[dict]:
-    path = _joint_batch_run_state_path()
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def _joint_batch_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    # kill(pid, 0) 对僵尸进程同样成功：被停掉的批量任务在父进程（Streamlit
-    # 服务）回收之前会以 Z 状态留在进程表里，页面会一直误报"运行中"。
-    # 读 /proc/<pid>/stat 的状态位，Z 视为已结束。
-    try:
-        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        state = stat_text.rsplit(")", 1)[1].split()[0]
-        return state != "Z"
-    except (OSError, IndexError):
-        return True  # 拿不到 /proc 时退回 kill(0) 的结论
-
-
 def _build_joint_batch_command(
     *,
     analysis_mode: str,
@@ -1323,6 +1299,7 @@ def _launch_joint_batch_run(
     *, target_count: int, log_tail_hint: str = "", **command_kwargs
 ) -> dict:
     """以独立后台进程启动批量联合分析，日志写结果目录，状态写 gbmtest 根。"""
+    clear_batch_stop_flag()
     cmd = _build_joint_batch_command(**command_kwargs)
     cwd = Path(__file__).resolve().parent.parent
     result_root = Path(command_kwargs["result_root"]).expanduser()
@@ -1346,7 +1323,7 @@ def _launch_joint_batch_run(
         "result_root": str(result_root),
         "targets": int(target_count),
     }
-    _joint_batch_run_state_path().write_text(
+    joint_batch_state_path().write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return state
@@ -1408,8 +1385,8 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
         disabled=df.empty,
     )
     st.markdown("---")
-    state = _read_joint_batch_run_state()
-    running = bool(state and _joint_batch_pid_alive(int(state["pid"])))
+    state = read_running_batch()
+    running = bool(state and batch_pid_alive(int(state["pid"])))
     if running:
         st.warning(
             f"已有批量任务在运行（PID {state['pid']}，{state.get('targets', '?')} 个目标，"
@@ -1483,13 +1460,45 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
             st.error(f"启动失败：{exc}")
 
     if state:
-        alive = _joint_batch_pid_alive(int(state["pid"]))
+        alive = batch_pid_alive(int(state["pid"]))
         st.markdown("---")
         st.subheader("最近一次批量运行")
         st.write(
             f"状态：{'运行中' if alive else '已结束'}　PID：{state['pid']}　"
             f"目标：{state.get('targets', '?')} 个　启动于：{state.get('started', '?')}"
         )
+        if alive:
+            col_stop, col_force = st.columns(2)
+            if state.get("stop_requested"):
+                col_stop.info(
+                    f"已请求停止（{state.get('stop_requested')}），等待当前暴完成…"
+                )
+            elif col_stop.button(
+                "停止批量分析（完成当前暴后退出）", key="joint_run_stop"
+            ):
+                try:
+                    stopped = request_batch_stop()
+                    state["stop_requested"] = stopped.get("stop_requested")
+                    st.success(
+                        f"已请求停止（PID {stopped['pid']}），完成当前暴后退出；"
+                        "已完成的结果与汇总会保留"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"停止请求失败：{exc}")
+            if col_force.button(
+                "强制停止（SIGKILL 进程组）", key="joint_run_force_stop"
+            ):
+                try:
+                    stopped = force_stop_batch()
+                    if stopped.get("kill_attempted"):
+                        st.warning(f"已强制停止（PID {stopped.get('pid')}）")
+                    else:
+                        st.info(
+                            f"批量任务（PID {stopped.get('pid')}）已结束，"
+                            "无需强制停止"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"强制停止失败：{exc}")
         st.code(" ".join(state.get("cmd", [])), language="bash")
         log_path = Path(state["log"]) if state.get("log") else None
         if log_path is not None and log_path.exists():

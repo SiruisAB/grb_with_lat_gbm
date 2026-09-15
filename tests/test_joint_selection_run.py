@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import time
 import unittest
 
 from grb_project.joint_selection import (
@@ -78,22 +81,22 @@ class BuildJointBatchCommandTests(unittest.TestCase):
 
 class JointBatchPidAliveTests(unittest.TestCase):
     def test_nonexistent_pid_is_dead(self):
-        from grb_project.web_app import _joint_batch_pid_alive
+        from grb_project.joint_selection import batch_pid_alive
 
-        self.assertFalse(_joint_batch_pid_alive(999999999))
+        self.assertFalse(batch_pid_alive(999999999))
 
     def test_self_pid_is_alive(self):
         import os
 
-        from grb_project.web_app import _joint_batch_pid_alive
+        from grb_project.joint_selection import batch_pid_alive
 
-        self.assertTrue(_joint_batch_pid_alive(os.getpid()))
+        self.assertTrue(batch_pid_alive(os.getpid()))
 
     def test_zombie_pid_is_dead(self):
         import os
         import time
 
-        from grb_project.web_app import _joint_batch_pid_alive
+        from grb_project.joint_selection import batch_pid_alive
 
         pid = os.fork()
         if pid == 0:
@@ -101,11 +104,112 @@ class JointBatchPidAliveTests(unittest.TestCase):
         try:
             # fork 到子进程真正进入 Z 状态有微秒级窗口，稍等它完成退出
             deadline = time.time() + 2.0
-            while time.time() < deadline and _joint_batch_pid_alive(pid):
+            while time.time() < deadline and batch_pid_alive(pid):
                 time.sleep(0.01)
-            self.assertFalse(_joint_batch_pid_alive(pid))
+            self.assertFalse(batch_pid_alive(pid))
         finally:
             os.waitpid(pid, 0)
+
+
+class BatchStopTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        from grb_project.session import session
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self._old_state = session.joint_batch_run_state_file
+        self._old_flag = session.stop_flag_file
+        session.joint_batch_run_state_file = str(root / "joint_batch_run.json")
+        session.stop_flag_file = str(root / "joint_batch_stop.flag")
+
+    def tearDown(self):
+        from grb_project.session import session
+
+        session.joint_batch_run_state_file = self._old_state
+        session.stop_flag_file = self._old_flag
+        self._tmp.cleanup()
+
+    def _write_state(self, pid):
+        from grb_project.joint_selection import joint_batch_state_path
+
+        state = {"pid": pid, "cmd": ["sleep"], "targets": 1}
+        joint_batch_state_path().write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return state
+
+    def test_request_stop_writes_flag_and_updates_state(self):
+        import os
+
+        from grb_project.joint_selection import (
+            joint_batch_stop_flag_path,
+            read_running_batch,
+            request_batch_stop,
+        )
+
+        self._write_state(os.getpid())
+        state = request_batch_stop()
+        self.assertTrue(joint_batch_stop_flag_path().exists())
+        self.assertTrue(state["stop_requested"])
+        self.assertTrue(read_running_batch()["stop_requested"])
+
+    def test_request_stop_without_running_batch_raises(self):
+        from grb_project.joint_selection import request_batch_stop
+
+        with self.assertRaises(RuntimeError):
+            request_batch_stop()
+
+    def test_force_stop_kills_group_leader_process(self):
+        import subprocess
+
+        from grb_project.joint_selection import (
+            batch_pid_alive,
+            force_stop_batch,
+            joint_batch_stop_flag_path,
+        )
+
+        proc = subprocess.Popen(
+            ["sleep", "30"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            self._write_state(proc.pid)
+            joint_batch_stop_flag_path().write_text("{}", encoding="utf-8")
+            state = force_stop_batch()
+            self.assertEqual(state["pid"], proc.pid)
+            self.assertTrue(state["force_stopped"])
+            deadline = time.time() + 3.0
+            while time.time() < deadline and batch_pid_alive(proc.pid):
+                time.sleep(0.05)
+            self.assertFalse(batch_pid_alive(proc.pid))
+            self.assertFalse(joint_batch_stop_flag_path().exists())
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_force_stop_on_dead_pid_reports_no_kill(self):
+        from grb_project.joint_selection import (
+            force_stop_batch,
+            joint_batch_state_path,
+        )
+
+        self._write_state(999999999)
+        state = force_stop_batch()
+        self.assertFalse(state["kill_attempted"])
+        self.assertNotIn("force_stopped", state)
+        saved = json.loads(joint_batch_state_path().read_text(encoding="utf-8"))
+        self.assertNotIn("force_stopped", saved)
+
+    def test_check_stop_requested_raises_on_flag(self):
+        from grb_project.joint_selection import joint_batch_stop_flag_path
+        from grb_project.session import AnalysisCancelled, check_stop_requested
+
+        joint_batch_stop_flag_path().write_text("{}", encoding="utf-8")
+        with self.assertRaises(AnalysisCancelled):
+            check_stop_requested()
 
 
 if __name__ == "__main__":
