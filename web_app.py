@@ -168,6 +168,14 @@ def _filter_joint_catalog_rows(
     return joint.loc[years >= int(year_from)].copy()
 
 
+def _selected_bnnames(bnnames: Sequence[str], state, default: bool = True) -> list:
+    """按勾选状态（joint_pick_<bn> 键）过滤目标；未出现过的键按 default。
+
+    state 是 st.session_state 这样的 Mapping；独立成纯函数便于单测。
+    """
+    return [bn for bn in bnnames if bool(state.get(f"joint_pick_{bn}", default))]
+
+
 def _validate_selected_models(selected_models: Sequence[str]) -> list[str]:
     models = [str(item).strip() for item in selected_models if str(item).strip()]
     if not models:
@@ -1393,6 +1401,42 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
             f"启动于 {state.get('started', '?')}）；结束后才能再次启动。"
         )
 
+    all_bns = result.bnnames
+    pre_selected = _selected_bnnames(all_bns, st.session_state)
+    with st.expander(
+        f"勾选要运行的目标（已选 {len(pre_selected)}/{len(all_bns)}，默认全选）",
+        expanded=False,
+    ):
+        head1, head2, _ = st.columns([1, 1, 3])
+        if head1.button("全选", key="joint_pick_all"):
+            for bn in all_bns:
+                st.session_state[f"joint_pick_{bn}"] = True
+        if head2.button("清空", key="joint_pick_none"):
+            for bn in all_bns:
+                st.session_state[f"joint_pick_{bn}"] = False
+        grb_of = {t.bnname: t.grb_name for t in result.targets}
+        by_year: dict = {}
+        for t in result.targets:
+            by_year.setdefault(t.year, []).append(t.bnname)
+        for year in sorted(by_year):
+            ybns = by_year[year]
+            ycol1, ycol2 = st.columns([1.6, 1])
+            ycol1.markdown(f"**{year} 年**（{len(ybns)} 个）")
+            if ycol2.button("全选本年", key=f"joint_pick_year_{year}"):
+                for bn in ybns:
+                    st.session_state[f"joint_pick_{bn}"] = True
+            per_row = 4
+            for start in range(0, len(ybns), per_row):
+                row = st.columns(per_row)
+                for col, bn in zip(row, ybns[start:start + per_row]):
+                    col.checkbox(
+                        grb_of[bn],
+                        value=bool(st.session_state.get(f"joint_pick_{bn}", True)),
+                        key=f"joint_pick_{bn}",
+                        help=bn,
+                    )
+    chosen = _selected_bnnames(all_bns, st.session_state)
+
     with st.expander("批量运行设置", expanded=not running):
         run_result_root = str(
             st.text_input(
@@ -1419,10 +1463,6 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
                 key="joint_run_lat_three_ml",
             )
         )
-        scope = st.radio("目标范围", ("全部选中目标", "手动挑选子集"), key="joint_run_scope")
-        chosen = None
-        if scope == "手动挑选子集":
-            chosen = st.multiselect("要运行的暴（bn 名）", result.bnnames, key="joint_run_targets")
         st.caption(
             "点击启动后会在服务器后台以独立进程运行批量联合分析"
             "（python -m grb_project select --run），页面可以关闭；"
@@ -1433,11 +1473,11 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
     if launched:
         try:
             models_validated = _validate_selected_models(run_models)
-            if chosen is not None and not chosen:
-                raise ValueError("手动挑选子集时至少选择一个暴")
+            if not chosen:
+                raise ValueError("至少勾选一个目标暴（可点「全选」）")
             if not run_result_root:
                 raise ValueError("结果目录不能为空")
-            target_count = len(chosen) if chosen is not None else len(result.targets)
+            target_count = len(chosen)
             info = _launch_joint_batch_run(
                 analysis_mode=run_mode,
                 result_root=run_result_root,
@@ -1447,7 +1487,7 @@ def _run_joint_selection_page(*, st, base_cfg: GRBProjectConfig) -> None:
                 year_to=year_to,
                 min_lat_ts=criteria.min_lat_ts,
                 include_lle_only=include_lle,
-                only=chosen,
+                only=(chosen if len(chosen) < len(result.bnnames) else None),
                 lat_extended_three_ml=run_lat_three_ml,
                 target_count=target_count,
             )

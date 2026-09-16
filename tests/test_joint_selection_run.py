@@ -212,5 +212,33 @@ class BatchStopTests(unittest.TestCase):
             check_stop_requested()
 
 
+class SelectedBnnamesTests(unittest.TestCase):
+    def test_default_all_selected(self):
+        from grb_project.web_app import _selected_bnnames
+
+        self.assertEqual(
+            _selected_bnnames(["bn081001234", "bn130502345"], {}),
+            ["bn081001234", "bn130502345"],
+        )
+
+    def test_unchecked_excluded_and_order_preserved(self):
+        from grb_project.web_app import _selected_bnnames
+
+        state = {"joint_pick_bn081001234": False, "joint_pick_bn130502345": True}
+        self.assertEqual(
+            _selected_bnnames(["bn130502345", "bn081001234", "bn220101215"], state),
+            ["bn130502345", "bn220101215"],
+        )
+
+    def test_default_false_respects_missing_keys(self):
+        from grb_project.web_app import _selected_bnnames
+
+        state = {"joint_pick_bn081001234": True}
+        self.assertEqual(
+            _selected_bnnames(["bn081001234", "bn220101215"], state, default=False),
+            ["bn081001234"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
