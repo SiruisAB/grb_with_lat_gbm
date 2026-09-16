@@ -62,6 +62,24 @@ def _normalize_targets(target_grbs) -> Optional[list[str]]:
     return [str(value) for value in target_grbs]
 
 
+def _atomic_write_summary(rows: list, path: Path) -> None:
+    """把当前累计摘要行原子写盘。
+
+    批量运行中途被停止（手动停止 / SIGTERM / 崩溃）时，已完成目标的
+    汇总必须留在盘上；直接 to_csv 会留下写了一半的文件，故先写临时文件
+    再 os.replace 原子替换。
+    """
+    if not rows:
+        return
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".part")
+    frame.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, path)
+
+
 def _effective_fit_mode(requested_mode: str, lat_plugin: object) -> str:
     if _mode_includes(requested_mode, "lat") and lat_plugin is not None:
         return "gbm+lat"
@@ -1219,6 +1237,13 @@ def run_single_analysis(
                 log(f"{bnname}: 光变曲线绘制失败（不影响拟合结果）: {exc}")
 
         log(f"{bnname}: 已完成单次分析目录 {result_dir}")
+
+        # 每完成一个目标就落盘一次：整批跑完才写的话，中途停止
+        # （手动停止/崩溃）会把已完成目标的汇总全部丢掉。
+        try:
+            _atomic_write_summary(summary_rows, run_root / summary_name)
+        except Exception as exc:  # noqa: BLE001
+            log(f"{bnname}: 增量写汇总失败（不影响本目标结果）: {exc}")
 
     df_summary = pd.DataFrame(summary_rows)
     summary_path = run_root / summary_name
