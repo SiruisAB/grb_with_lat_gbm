@@ -47,6 +47,8 @@ class GRBProjectConfig:
     models: Optional[Sequence[str]] = None
     parallel_models: bool = True
     model_workers: int = 2
+    # 单个模型拟合的 wall-clock 上限（秒），<=0 表示不限时。
+    model_fit_timeout_s: float = 5400.0
     plot_style: Optional[dict] = None
     special_yaml: Optional[str] = None
     special_burst_name: Optional[str] = None
@@ -76,6 +78,7 @@ class GRBRunOverrides:
     models: Optional[Sequence[str]] = None
     parallel_models: Optional[bool] = None
     model_workers: Optional[int] = None
+    model_fit_timeout_s: Optional[float] = None
     plot_style: Optional[dict] = None
     special_yaml: Optional[str] = None
     special_burst_name: Optional[str] = None
@@ -105,6 +108,7 @@ class GRBRunOverrides:
                 "models",
                 "parallel_models",
                 "model_workers",
+                "model_fit_timeout_s",
                 "plot_style",
                 "special_yaml",
                 "special_burst_name",

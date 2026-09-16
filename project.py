@@ -7,6 +7,7 @@ import json
 import multiprocessing as mp
 import os
 import queue as queue_module
+import time
 import traceback
 from pathlib import Path
 from typing import Optional, Sequence
@@ -82,6 +83,29 @@ def _parallel_model_settings(
     return enabled and workers > 1, workers
 
 
+# 单个模型拟合的默认 wall-clock 上限（秒）。实测正常的 band+bb 最慢 31 分钟，
+# 这里留出近 3 倍余量；超过基本可判定为采样器陷在退化后验里空转。
+_DEFAULT_MODEL_FIT_TIMEOUT_S = 5400.0
+
+
+def _model_fit_timeout_s(
+    project_config: Optional[GRBProjectConfig],
+    run_overrides: Optional[GRBRunOverrides],
+) -> Optional[float]:
+    """单模型超时秒数；返回 None 表示不限时。"""
+    raw = _configured_value(
+        run_overrides,
+        project_config,
+        "model_fit_timeout_s",
+        _DEFAULT_MODEL_FIT_TIMEOUT_S,
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MODEL_FIT_TIMEOUT_S
+    return value if value > 0 else None
+
+
 def _model_fit_worker_entry(result_queue, fit_kwargs: dict) -> None:
     for variable in (
         "OMP_NUM_THREADS",
@@ -119,10 +143,25 @@ def _model_fit_worker_entry(result_queue, fit_kwargs: dict) -> None:
 _WORKER_EXIT_GRACE_S = 30.0
 
 
-def _run_parallel_model_jobs(jobs: Sequence[dict], max_workers: int) -> list[dict]:
+def _kill_worker(process) -> None:
+    """先 SIGTERM，宽限期内不退再 SIGKILL。"""
+    process.terminate()
+    process.join(timeout=_WORKER_EXIT_GRACE_S)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=_WORKER_EXIT_GRACE_S)
+
+
+def _run_parallel_model_jobs(
+    jobs: Sequence[dict],
+    max_workers: int,
+    timeout_s: Optional[float] = None,
+    worker_entry=None,
+) -> list[dict]:
     if "fork" not in mp.get_all_start_methods():
         raise RuntimeError("当前平台不支持 fork 多进程")
 
+    entry = worker_entry or _model_fit_worker_entry
     context = mp.get_context("fork")
     outcomes: list[Optional[dict]] = [None] * len(jobs)
     for batch_start in range(0, len(jobs), max_workers):
@@ -130,20 +169,38 @@ def _run_parallel_model_jobs(jobs: Sequence[dict], max_workers: int) -> list[dic
         for job_index in range(batch_start, min(batch_start + max_workers, len(jobs))):
             result_queue = context.Queue(maxsize=1)
             process = context.Process(
-                target=_model_fit_worker_entry,
+                target=entry,
                 args=(result_queue, jobs[job_index]),
                 name=f"grb-model-{jobs[job_index]['model_str']}",
             )
             process.start()
-            batch.append((job_index, process, result_queue))
+            batch.append((job_index, process, result_queue, time.monotonic()))
 
-        for job_index, process, result_queue in batch:
+        for job_index, process, result_queue, started_at in batch:
             outcome = None
+            timed_out = False
+            deadline = started_at + timeout_s if timeout_s else None
             while outcome is None and process.is_alive():
                 try:
                     outcome = result_queue.get(timeout=0.5)
                 except queue_module.Empty:
+                    # dynesty 的嵌套采样没有迭代上限（跑到 dlogz 才停）。
+                    # 后验一旦与连续谱退化就会满核空转，而父进程原本
+                    # 只判 process.is_alive()，一个病态 bin 就能把整批
+                    # 目标无限期堵死（实测堵了 3.5 小时且日志毫无输出，
+                    # 因为 bs.sample(quiet=True) 不打进度）。
+                    if deadline is not None and time.monotonic() >= deadline:
+                        timed_out = True
+                        _kill_worker(process)
+                        break
                     continue
+            if timed_out:
+                from .logging_utils import log
+
+                log(
+                    f"模型 {jobs[job_index].get('model_str')} 拟合超过 "
+                    f"{timeout_s:g}s 未返回，已终止该模型子进程并记为失败"
+                )
             # 子进程即使已经把结果放进队列，仍可能卡在解释器退出阶段
             # （matplotlib/threeML 的 atexit 钩子、未回收的后台线程等）。
             # 原来的 process.join() 没有超时，遇到这种情况整批拟合会带着
@@ -160,7 +217,11 @@ def _run_parallel_model_jobs(jobs: Sequence[dict], max_workers: int) -> list[dic
                 except queue_module.Empty:
                     outcome = {
                         "ok": False,
-                        "error": f"模型子进程退出码 {process.exitcode}，但没有返回结果",
+                        "error": (
+                            f"模型拟合超过 {timeout_s:g}s 未返回，已终止子进程"
+                            if timed_out
+                            else f"模型子进程退出码 {process.exitcode}，但没有返回结果"
+                        ),
                     }
             try:
                 outcomes[job_index] = outcome
@@ -759,11 +820,18 @@ def _run_gbm_analysis(
         )
         if use_parallel:
             active_workers = min(model_workers, len(model_jobs))
+            fit_timeout_s = _model_fit_timeout_s(project_config, run_overrides)
+            timeout_note = (
+                f", 单模型超时 {fit_timeout_s:g}s" if fit_timeout_s else ", 单模型不限时"
+            )
             log(
                 f"{bnname}: running {len(model_jobs)} models with "
                 f"{active_workers} parallel processes for bin {bin_start:g}-{bin_end:g}"
+                f"{timeout_note}"
             )
-            outcomes = _run_parallel_model_jobs(model_jobs, active_workers)
+            outcomes = _run_parallel_model_jobs(
+                model_jobs, active_workers, fit_timeout_s
+            )
         else:
             outcomes = []
             for fit_kwargs in model_jobs:

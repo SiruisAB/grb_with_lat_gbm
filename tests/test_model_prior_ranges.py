@@ -77,6 +77,7 @@ def _load_modelbuild(monkeypatch):
     astromodels.NonDissipativePhotosphere = _NDP
     astromodels.PointSource = object
     astromodels.Powerlaw = _Powerlaw
+    astromodels.DoubleSmoothlyBrokenPowerlaw = _ModelShape
     astromodels.Uniform_prior = _Prior
 
     astropy = types.ModuleType("astropy")
@@ -121,7 +122,26 @@ def test_joint_models_expand_energy_range_to_lat(monkeypatch):
 
     _assert_energy_parameter(module.build_model("band", analysis_mode="gbm+lat").xp, 8.0, 1e8)
     _assert_energy_parameter(module.build_model("comp", analysis_mode="gbm+lat").xc, 8.0, 1e8)
-    _assert_energy_parameter(module.build_model("blackbody", analysis_mode="gbm+lat").kT, 8.0, 1e8)
+
+
+def test_thermal_temperatures_do_not_follow_lat_expansion(monkeypatch):
+    """热成分的 kT 只能由 GBM 波段约束，LAT(>100 MeV) 对它没有约束力。
+
+    若 kT 跟着 gbm+lat 放宽到 1e8 keV，多出的 3.4 个数量级全是与连续谱
+    退化的平坦似然区，dynesty 会在里面空转（实测单 bin 满核 3.5 小时未收敛）。
+    """
+    module = _load_modelbuild(monkeypatch)
+
+    # 单模型黑体：直接取参数验证
+    _assert_energy_parameter(
+        module.build_model("blackbody", analysis_mode="gbm+lat").kT, 8.0, 4.0e4
+    )
+    # 无论哪种模式，热成分温度都封顶在 GBM 波段
+    _assert_energy_parameter(
+        module.build_model("blackbody", analysis_mode="gbm").kT, 8.0, 4.0e4
+    )
+    # 复合模型（band+bb / band+mbb 等）在本文件的桩里被摊平为元组，
+    # 属性不可达，其温度站点由下面的源码字符串测试逐处覆盖。
 
 
 def test_bayesian_fit_passes_analysis_mode_to_model_builder():
@@ -150,15 +170,27 @@ def test_energy_models_assign_real_astromodel_parameter_names():
     assert "band.k," not in source
 
 
-def test_mbb_temperatures_each_use_the_full_selected_energy_range():
+def test_mbb_temperatures_use_thermal_bounds_not_energy_bounds():
+    """多色黑体的 kT_min/kT_max 与单色黑体一样走 thermal_bounds。"""
     path = Path(__file__).parents[1] / "modelbuild.py"
     source = path.read_text(encoding="utf-8")
 
     assert "_mbb_temperature_bounds" not in source
-    assert source.count("_set_energy_prior(m.kT_min, energy_bounds)") == 1
-    assert source.count("_set_energy_prior(m.kT_max, energy_bounds)") == 1
-    assert source.count("_set_energy_prior(mbb.kT_min, energy_bounds)") == 2
-    assert source.count("_set_energy_prior(mbb.kT_max, energy_bounds)") == 2
+    assert source.count("_set_energy_prior(m.kT_min, thermal_bounds)") == 1
+    assert source.count("_set_energy_prior(m.kT_max, thermal_bounds)") == 1
+    assert source.count("_set_energy_prior(mbb.kT_min, thermal_bounds)") == 2
+    assert source.count("_set_energy_prior(mbb.kT_max, thermal_bounds)") == 2
+    # 不得有温度参数漏回 energy_bounds
+    for leaked in (
+        "m.kT, energy_bounds",
+        "m.kT_min, energy_bounds",
+        "m.kT_max, energy_bounds",
+        "mbb.kT_min, energy_bounds",
+        "mbb.kT_max, energy_bounds",
+        "bb.kT, energy_bounds",
+        "m.kT_1, energy_bounds",
+    ):
+        assert leaked not in source, f"{leaked} 仍在使用 energy_bounds"
 
 
 def test_gaussian_width_uses_the_selected_detector_lower_bound():

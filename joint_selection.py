@@ -409,6 +409,12 @@ def add_selection_arguments(parser) -> None:
     parser.add_argument("--session-log", action="store_true")
     parser.add_argument("--models", nargs="+", default=None, help="透传给分析的模型列表")
     parser.add_argument(
+        "--model-fit-timeout",
+        type=float,
+        default=None,
+        help="单个模型拟合的超时秒数（默认 5400；<=0 表示不限时）",
+    )
+    parser.add_argument(
         "--only", nargs="+", default=None, help="仅保留选中结果里的这些 bn（子集收窄）"
     )
     parser.add_argument(
@@ -480,6 +486,7 @@ def cli_main_from_args(args):
     overrides = GRBRunOverrides(
         models=list(args.models) if args.models else None,
         lat_three_ml_full=True if getattr(args, "lat_extended_three_ml", False) else None,
+        model_fit_timeout_s=getattr(args, "model_fit_timeout", None),
     )
     if overrides.is_empty():
         overrides = None

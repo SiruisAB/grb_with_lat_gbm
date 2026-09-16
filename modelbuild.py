@@ -22,12 +22,28 @@ from threeML import *
 
 GBM_ENERGY_BOUNDS_KEV = (8.0, 4.0e4)
 GBM_LAT_ENERGY_BOUNDS_KEV = (8.0, 1.0e8)
+# 热成分温度的先验上限（keV）：与 GBM 波段上限一致，不随 LAT 放宽。
+THERMAL_TEMPERATURE_MAX_KEV = 4.0e4
 
 
 def _energy_bounds_for_mode(analysis_mode):
     if "lat" in str(analysis_mode or "").lower():
         return GBM_LAT_ENERGY_BOUNDS_KEV
     return GBM_ENERGY_BOUNDS_KEV
+
+
+def _thermal_bounds_for_mode(analysis_mode):
+    """黑体/多色黑体的温度边界：两种模式一律封顶在 GBM 波段上限。
+
+    热成分的温度只能由 GBM 波段的谱形约束——LAT（>100 MeV）对 kT 没有
+    任何约束力。若让 kT 跟着 gbm+lat 的能量边界放宽到 1e8 keV，多出的
+    3.4 个数量级全是与 Band/Comp 连续谱退化的平坦似然区；dynesty 的嵌套
+    采样没有迭代上限（跑到 dlogz 才停），在这种退化区里效率会塌掉。
+    实测 band+bb 曾因此在单个 bin 上满核空转 3.5 小时仍未收敛，而同暴
+    同 bin 的 band 只要 2 分钟。
+    """
+    lower, upper = _energy_bounds_for_mode(analysis_mode)
+    return (lower, min(upper, THERMAL_TEMPERATURE_MAX_KEV))
 
 
 def _set_energy_prior(parameter, bounds):
@@ -164,6 +180,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         GBM+LAT: 8-1e8 keV
     """
     energy_bounds = _energy_bounds_for_mode(analysis_mode)
+    thermal_bounds = _thermal_bounds_for_mode(analysis_mode)
     # def make_one(mstr):
     if mstr == "band":
         m = Band(piv=1E2)
@@ -234,7 +251,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         # 设置参数边界
         m.K, m.kT = parameters[0], parameters[1]
         m.K.min_value, m.K.max_value = 1e-12, 1e3
-        _set_energy_prior(m.kT, energy_bounds)
+        _set_energy_prior(m.kT, thermal_bounds)
 
     elif mstr == 'NDP':
         m = NonDissipativePhotosphere(piv=1E2)
@@ -298,7 +315,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         # Blackbody部分参数设置
         bb.K.prior = Log_uniform_prior(lower_bound=1e-7, upper_bound=1)
         bb.K, bb.kT = parameters[4], parameters[5]
-        _set_energy_prior(bb.kT, energy_bounds)
+        _set_energy_prior(bb.kT, thermal_bounds)
         # bb.K.min_value, bb.K.max_value = 1e-7, 1
         
         m = band + bb
@@ -309,8 +326,8 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         m.K.prior = Log_uniform_prior(lower_bound=1e-10, upper_bound=1e3)
         m.m.prior = Uniform_prior(lower_bound=-2.5, upper_bound=1)
         m.K, m.kT_min, m.kT_max, m.m = parameters[0], parameters[1], parameters[2], parameters[3]
-        _set_energy_prior(m.kT_min, energy_bounds)
-        _set_energy_prior(m.kT_max, energy_bounds)
+        _set_energy_prior(m.kT_min, thermal_bounds)
+        _set_energy_prior(m.kT_max, thermal_bounds)
 
     elif mstr == 'band+mbb':
         band = Band(piv=1E2)
@@ -334,8 +351,8 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         mbb.K.prior = Log_uniform_prior(lower_bound=1e-10, upper_bound=1e3)
         mbb.m.prior = Uniform_prior(lower_bound=-2.5, upper_bound=1)
         mbb.K, mbb.kT_min, mbb.kT_max, mbb.m = parameters[4], parameters[5], parameters[6], parameters[7]
-        _set_energy_prior(mbb.kT_min, energy_bounds)
-        _set_energy_prior(mbb.kT_max, energy_bounds)
+        _set_energy_prior(mbb.kT_min, thermal_bounds)
+        _set_energy_prior(mbb.kT_max, thermal_bounds)
 
         m = band + mbb
 
@@ -352,8 +369,8 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
             parameters[2],
             parameters[3],
         )
-        _set_energy_prior(mbb.kT_min, energy_bounds)
-        _set_energy_prior(mbb.kT_max, energy_bounds)
+        _set_energy_prior(mbb.kT_min, thermal_bounds)
+        _set_energy_prior(mbb.kT_max, thermal_bounds)
         pl.K.prior = Log_uniform_prior(lower_bound=1e-8, upper_bound=1e1)
         pl.index.prior = Truncated_gaussian(
             lower_bound=-10.0, upper_bound=10.0, mu=parameters[5], sigma=0.5
@@ -406,7 +423,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
                                         upper_bound=1E1)
         bb.K, bb.kT = parameters[3], parameters[4]
         bb.K.min_value, bb.K.max_value = 1e-9, 1e1
-        _set_energy_prior(bb.kT, energy_bounds)
+        _set_energy_prior(bb.kT, thermal_bounds)
         
         m = comp + bb
     elif mstr == "comp+pl":
@@ -447,7 +464,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
         m.index_2.prior = Uniform_prior(lower_bound=-10.0, upper_bound=10.0)
 
         m.K_1,m.kT_1,m.K_2,m.index_2 = parameters[0], parameters[1], parameters[2], parameters[3]
-        _set_energy_prior(m.kT_1, energy_bounds)
+        _set_energy_prior(m.kT_1, thermal_bounds)
 
     elif mstr == "band+bb+pl":
         band = Band(piv=1E2)
@@ -469,7 +486,7 @@ def build_model(mstr, parameters=None, analysis_mode="gbm"):
                                         upper_bound=1E1)
         bb.K, bb.kT = parameters[4], parameters[5]
         bb.K.min_value, bb.K.max_value = 1e-9, 1e1
-        _set_energy_prior(bb.kT, energy_bounds)
+        _set_energy_prior(bb.kT, thermal_bounds)
 
 
         pl.K.prior = Log_uniform_prior(lower_bound=1e-10, upper_bound=1e3)
