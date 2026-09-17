@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -89,6 +90,20 @@ def _param_errors_from_fits(fits_path: Path) -> dict:
     return out
 
 
+def _import_build_model():
+    """导入 build_model，不依赖本脚本所在的层级。
+
+    脚本可能被放在不同位置（仓库内、临时目录被 cron 调用的副本），
+    所以先用显式路径，再退回按包名导入。
+    """
+    project_root = Path(os.environ.get("GRB_PROJECT_ROOT", "/home/mxr/lee/gbmtest"))
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from grb_project.modelbuild import build_model
+
+    return build_model
+
+
 def _build_row(burst_dir: Path, model_dir: Path, bundle: Path) -> dict:
     fp = json.loads((bundle / "fit_parameters.json").read_text(encoding="utf-8"))
     manifest_path = bundle / "manifest.json"
@@ -108,8 +123,7 @@ def _build_row(burst_dir: Path, model_dir: Path, bundle: Path) -> dict:
     bin_end = float(fp["bin_end_s"])
 
     # 用合适模式重建模型
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from grb_project.modelbuild import build_model
+    build_model = _import_build_model()
 
     # 与 bayesian_fit 的口径一致：含 lat 到 1e8 keV，纯 GBM 到 4e4 keV。
     # 模型也按实际模式构建（纯 GBM 不该带 LAT 的 1e8 能量边界）。
