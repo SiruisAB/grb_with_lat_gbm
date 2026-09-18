@@ -391,7 +391,19 @@ def _build_gbm_plugin_for_detector(
                 restore_background=f"{det}_bkg.h5",
                 poly_order=-1,
             )
-            ts_tte.set_background_interval(*background_parts)
+            try:
+                ts_tte.set_background_interval(*background_parts)
+            except Exception as exc:  # noqa: BLE001
+                # threeML 在 TTE 到达时间与全部本底窗都不重叠时会把这些窗
+                # 全部丢弃，随后 _fit_polynomials 里 all_bkg_masks[0] 抛
+                # IndexError。本底此时已从 cspec 拟合的 h5 还原，重拟合并非
+                # 必需，不能因此丢掉整个探测器；后续步骤若真的用不了会各自
+                # 给出明确提示。
+                log(
+                    f"警告: 探测器 {det} 的 TTE 本底重拟合失败"
+                    f"（{type(exc).__name__}: {exc}），"
+                    "本底沿用已还原的 cspec 拟合结果"
+                )
             time_series[det] = ts_tte
 
         try:
