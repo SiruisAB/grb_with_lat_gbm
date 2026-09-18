@@ -116,6 +116,20 @@ def find_files(path: str, ext: str) -> List[str]:
     ]
 
 
+def find_files_any(path: str, exts) -> List[str]:
+    """按 exts 的优先级返回第一个有命中的扩展名对应的文件列表。
+
+    GBM 响应矩阵有两代命名：早期的 ``.rsp`` 与较新的 ``.rsp2``（HEASARC 上
+    约 44 个暴只有前者）。逐个扩展名试，取第一个非空的结果。注意 find_files
+    用 ``str.endswith`` 匹配，``".rsp"`` 不会命中 ``".rsp2"``，回退是安全的。
+    """
+    for ext in exts:
+        hits = find_files(path, ext)
+        if hits:
+            return hits
+    return []
+
+
 def ensure_dir(path: str) -> str:
     """确保目录存在并返回该路径。"""
     os.makedirs(path, exist_ok=True)

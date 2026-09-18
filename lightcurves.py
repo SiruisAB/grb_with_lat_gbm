@@ -261,11 +261,13 @@ def resolve_gbm_tte_rsp(grb_dir: Union[str, Path], det: str) -> Tuple[Path, Path
     """在暴目录下匹配 ``glg_tte_{det}_*.fit`` 与 ``glg_cspec_{det}_*.rsp2``。"""
     d = Path(grb_dir)
     ttes = sorted(d.glob(f"glg_tte_{det}_*.fit"))
-    rsps = sorted(d.glob(f"glg_cspec_{det}_*.rsp2"))
+    rsps = sorted(d.glob(f"glg_cspec_{det}_*.rsp2")) or sorted(
+        d.glob(f"glg_cspec_{det}_*.rsp")
+    )
     if not ttes:
         raise FileNotFoundError(f"{d}: 未找到 glg_tte_{det}_*.fit")
     if not rsps:
-        raise FileNotFoundError(f"{d}: 未找到 glg_cspec_{det}_*.rsp2")
+        raise FileNotFoundError(f"{d}: 未找到 glg_cspec_{det}_*.rsp2/.rsp")
     return ttes[0], rsps[0]
 
 

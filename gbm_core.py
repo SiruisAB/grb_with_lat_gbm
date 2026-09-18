@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .io_utils import find_files
+from .io_utils import find_files, find_files_any
 from .logging_utils import log
 from .runtime_env import ensure_analysis_runtime
 
@@ -270,6 +270,42 @@ def _normalize_background_interval(value: str | Sequence[str]) -> tuple[str, ...
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
+def _build_cspec_background(
+    det: str,
+    cspec: str,
+    rsp: str,
+    background_parts: Sequence[str],
+    out_h5: str,
+) -> None:
+    """用 cspec 拟合本底并落盘，供随后的 TTE 复用。
+
+    默认交给 threeML 自动定阶；但短暴的 cspec 时间 bin 太少时，自动定阶分支里
+    ``selected_counts`` 会退化成 1 维，在 ``.sum(axis=1)`` 处抛 numpy.AxisError。
+    该异常原本未被捕获，会导致探测器被静默丢弃（所有探测器都失败时整个目标
+    只剩空目录）。这里退到固定阶数重试。
+    """
+    last_exc: Optional[BaseException] = None
+    for poly_order in (None, 2, 3):
+        try:
+            extra = {} if poly_order is None else {"poly_order": poly_order}
+            ts = TimeSeriesBuilder.from_gbm_cspec_or_ctime(
+                det,
+                cspec_or_ctime_file=cspec,
+                rsp_file=rsp,
+                **extra,
+            )
+            ts.set_background_interval(*background_parts)
+            ts.save_background(out_h5, overwrite=True)
+            if poly_order is not None:
+                log(f"{det}: 自动定阶失败，本底改用 {poly_order} 阶多项式")
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            order_label = "自动" if poly_order is None else f"{poly_order}"
+            log(f"{det}: cspec 本底（{order_label}阶）失败: {type(exc).__name__}: {exc}")
+    raise RuntimeError(f"{det}: cspec 本底拟合始终失败: {last_exc}") from last_exc
+
+
 def _build_gbm_plugin_for_detector(
     det: str,
     grb_dir: str,
@@ -285,7 +321,9 @@ def _build_gbm_plugin_for_detector(
     cspec = ""
     try:
         rsp = next(
-            f for f in find_files(grb_dir, ".rsp2") if f"_cspec_{det}_" in f
+            f
+            for f in find_files_any(grb_dir, (".rsp2", ".rsp"))
+            if f"_cspec_{det}_" in f
         )
         tte = next(
             f for f in find_files(grb_dir, ".fit") if f"_tte_{det}_" in f
@@ -337,14 +375,14 @@ def _build_gbm_plugin_for_detector(
     try:
         ts_tte = time_series.get(det)
         if ts_tte is None:
-            ts_cspec = TimeSeriesBuilder.from_gbm_cspec_or_ctime(
-                det,
-                cspec_or_ctime_file=cspec,
-                rsp_file=rsp,
-            )
             log(f"background_interval: {background_parts}")
-            ts_cspec.set_background_interval(*background_parts)
-            ts_cspec.save_background(f"{det}_bkg.h5", overwrite=True)
+            _build_cspec_background(
+                det,
+                cspec=cspec,
+                rsp=rsp,
+                background_parts=background_parts,
+                out_h5=f"{det}_bkg.h5",
+            )
 
             ts_tte = TimeSeriesBuilder.from_gbm_tte(
                 det,

@@ -209,7 +209,14 @@ def _build_restored_gbm_plugin(
     ts_tte = time_series.get(detector)
     if ts_tte is None:
         tte = _find_detector_file(source_dir, detector, ".fit", f"_tte_{detector}_")
-        rsp = _find_detector_file(source_dir, detector, ".rsp2", f"_cspec_{detector}_")
+        try:
+            rsp = _find_detector_file(
+                source_dir, detector, ".rsp2", f"_cspec_{detector}_"
+            )
+        except FileNotFoundError:
+            rsp = _find_detector_file(
+                source_dir, detector, ".rsp", f"_cspec_{detector}_"
+            )
         background = (work_dir / f"{detector}_bkg.h5").resolve()
         if not background.is_file():
             raise FileNotFoundError(

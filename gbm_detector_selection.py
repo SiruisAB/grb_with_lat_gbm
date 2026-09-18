@@ -7,7 +7,7 @@ from typing import List, Tuple
 
 from astropy.io import fits as pyfits
 
-from .io_utils import find_files
+from .io_utils import find_files, find_files_any
 
 
 def select_gbm_detectors(grb_dir: str) -> Tuple[List[str], float, float, float, float]:
@@ -21,7 +21,12 @@ def select_gbm_detectors(grb_dir: str) -> Tuple[List[str], float, float, float, 
         ra_scx, dec_scx = trig[0].header["RA_SCX"], trig[0].header["DEC_SCX"]
         ra_scz, dec_scz = trig[0].header["RA_SCZ"], trig[0].header["DEC_SCZ"]
 
-    rsp_file = find_files(grb_dir, ".rsp2")[0]
+    rsp_candidates = find_files_any(grb_dir, (".rsp2", ".rsp"))
+    if not rsp_candidates:
+        raise FileNotFoundError(
+            f"{grb_dir}: 未找到响应矩阵（.rsp2 或 .rsp），无法选择探测器"
+        )
+    rsp_file = rsp_candidates[0]
 
     ra_obj = pyfits.getval(
         rsp_file,
