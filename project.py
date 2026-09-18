@@ -461,6 +461,24 @@ def _resolve_runtime_intervals(
     return active_interval, background_interval
 
 
+def _gbm_dir_has_data(path: Path) -> bool:
+    """目录里是否真有 GBM 产物（trigdat 或任一 glg_* 文件）。
+
+    只判 ``exists()`` 不够：下载中断会留下 ``GBM_data/<bn>/<bn>/current/``
+    这种空壳嵌套目录（全库 22 个），它排在候选列表最前面；一旦被选中，
+    ``select_gbm_detectors`` 找不到 trigdat 而失败，整个目标就以
+    "GBM 联合拟合失败: "（原因字段为空）告败。这里改为优先挑有
+    trigdat/glg_* 产物的目录，空壳直接跳过。
+    """
+    try:
+        for entry in path.iterdir():
+            if entry.name.startswith("glg_") or "trigdat" in entry.name:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _resolve_gbm_source_dir(bnname: str, grb_name: str) -> str:
     candidates = [
         Path(session.data_dir) / grb_name / bnname,
@@ -468,9 +486,12 @@ def _resolve_gbm_source_dir(bnname: str, grb_name: str) -> str:
         Path(session.data_dir) / grb_name,
         Path(session.data_dir),
     ]
-    for candidate in candidates:
-        if candidate.exists():
+    existing = [c for c in candidates if c.exists()]
+    for candidate in existing:
+        if _gbm_dir_has_data(candidate):
             return str(candidate)
+    if existing:
+        return str(existing[0])
     return str(candidates[-1])
 
 

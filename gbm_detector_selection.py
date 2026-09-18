@@ -15,9 +15,15 @@ def select_gbm_detectors(grb_dir: str) -> Tuple[List[str], float, float, float, 
 
     :returns: ``(detector_names, ra_scx, dec_scx, ra_scz, dec_scz)``
     """
-    with pyfits.open(
-        next(f for f in find_files(grb_dir, ".fit") if "trigdat_all" in f)
-    ) as trig:
+    trigdat_candidates = [
+        f for f in find_files(grb_dir, ".fit") if "trigdat_all" in f
+    ]
+    if not trigdat_candidates:
+        raise FileNotFoundError(
+            f"{grb_dir}: 未找到 trigdat（glg_trigdat_all_*.fit），无法选择探测器；"
+            "该目录可能只是下载中断留下的空壳"
+        )
+    with pyfits.open(trigdat_candidates[0]) as trig:
         ra_scx, dec_scx = trig[0].header["RA_SCX"], trig[0].header["DEC_SCX"]
         ra_scz, dec_scz = trig[0].header["RA_SCZ"], trig[0].header["DEC_SCZ"]
 
