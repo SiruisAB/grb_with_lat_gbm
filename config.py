@@ -48,7 +48,7 @@ class GRBProjectConfig:
     parallel_models: bool = True
     model_workers: int = 2
     # 单个模型拟合的 wall-clock 上限（秒），<=0 表示不限时。
-    model_fit_timeout_s: float = 5400.0
+    model_fit_timeout_s: float = 1200.0
     plot_style: Optional[dict] = None
     special_yaml: Optional[str] = None
     special_burst_name: Optional[str] = None

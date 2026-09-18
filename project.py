@@ -101,9 +101,10 @@ def _parallel_model_settings(
     return enabled and workers > 1, workers
 
 
-# 单个模型拟合的默认 wall-clock 上限（秒）。实测正常的 band+bb 最慢 31 分钟，
-# 这里留出近 3 倍余量；超过基本可判定为采样器陷在退化后验里空转。
-_DEFAULT_MODEL_FIT_TIMEOUT_S = 5400.0
+# 单个模型拟合的默认 wall-clock 上限（秒）。实测正常目标中位 ~110s、
+# 最慢 ~410s；超过 20 分钟基本可判定为采样器陷在退化后验里空转，
+# 直接终止该模型并跳过（不拖累同批其它目标）。
+_DEFAULT_MODEL_FIT_TIMEOUT_S = 1200.0
 
 
 def _model_fit_timeout_s(
