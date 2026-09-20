@@ -104,7 +104,7 @@ special_bursts:
   bnname: bn220921462
   description: 特殊背景窗（原先硬编码在 gbm_core 中）
   background_interval: -23.960--2.080,75-100,140-160
-# 以下 8 个 2026 暴的目录表缺 back_interval_* 四列（值为 nan-nan），
+# 以下 2026 暴的目录表缺 back_interval_* 四列（值为 nan-nan），
 # 导致所有探测器因本底区间不可解析而被跳过。这里按 T90 取同量级老暴
 # 最近邻的窗口中位数补上；如与你的预期不符请直接改这里的数值。
 - name: bn260208214
@@ -143,7 +143,3 @@ special_bursts:
   bnname: bn260226443
   description: 目录表缺本底窗，按同 T90(173.1s) 老暴中位数补
   background_interval: -50.0--10.83,206.25-238.13
-- name: bn260411337
-  bnname: bn260411337
-  description: 目录表缺本底窗，按同 T90(32.8s) 老暴中位数补
-  background_interval: -28.33--7.08,39.17-73.88
