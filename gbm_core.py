@@ -316,29 +316,35 @@ def _build_gbm_plugin_for_detector(
     time_series: Dict[str, TimeSeriesBuilder],
     output_dir: Optional[str] = None,
 ) -> Optional[OGIPLike]:
-    rsp = ""
     tte = ""
     cspec = ""
+    # 同一探测器常有多份响应矩阵：较新的 .rsp2 与早期的 .rsp，各自还有多个
+    # vNN 版本，时间覆盖范围并不相同。默认仍优先 .rsp2（时间相关响应，精度
+    # 更好），但当它盖不住源区间时 threeML 会抛 IntervalOfInterestNotCovered
+    # ——该异常消息为空，日志里只剩 "无法为探测器 X 写入PHA文件: "，整颗探测
+    # 器作废、目标被记成"没有成功构建 GBM 插件"。故收全两类候选，主选失败时
+    # 按序回退重试。
+    # 不能用 find_files_any：它只返回第一个有命中的扩展名，存在 .rsp2 时永远
+    # 看不到 .rsp。
+    rsp_candidates = [
+        f
+        for f in find_files(grb_dir, ".rsp2") + find_files(grb_dir, ".rsp")
+        if f"_cspec_{det}_" in f
+    ]
     try:
-        rsp = next(
-            f
-            for f in find_files_any(grb_dir, (".rsp2", ".rsp"))
-            if f"_cspec_{det}_" in f
-        )
         tte = next(
             f for f in find_files(grb_dir, ".fit") if f"_tte_{det}_" in f
         )
         cspec = next(
             f for f in find_files(grb_dir, ".pha") if f"_cspec_{det}_" in f
         )
-        log(f"rsp: {rsp}")
-        log(f"tte: {tte}")
-        log(f"cspec: {cspec}")
     except StopIteration as exc:  # noqa: BLE001
         log(f"警告: 未能找到 {det} 的必要文件: {exc}")
-        log(f"rsp: {rsp}")
         log(f"tte: {tte}")
         log(f"cspec: {cspec}")
+        return None
+    if not rsp_candidates:
+        log(f"警告: 未找到 {det} 的响应矩阵（.rsp2 或 .rsp），跳过该探测器")
         return None
 
     background_parts = _normalize_background_interval(background_interval)
@@ -373,94 +379,139 @@ def _build_gbm_plugin_for_detector(
     cwd = os.getcwd()
     os.chdir(work_dir)
     try:
-        ts_tte = time_series.get(det)
-        if ts_tte is None:
-            log(f"background_interval: {background_parts}")
-            _build_cspec_background(
-                det,
-                cspec=cspec,
-                rsp=rsp,
-                background_parts=background_parts,
-                out_h5=f"{det}_bkg.h5",
-            )
-
-            ts_tte = TimeSeriesBuilder.from_gbm_tte(
-                det,
-                tte_file=tte,
-                rsp_file=rsp,
-                restore_background=f"{det}_bkg.h5",
-                poly_order=-1,
-            )
+        last_exc: Optional[BaseException] = None
+        for rsp in rsp_candidates:
+            log(f"rsp: {rsp}")
+            log(f"tte: {tte}")
+            log(f"cspec: {cspec}")
             try:
-                ts_tte.set_background_interval(*background_parts)
-            except Exception as exc:  # noqa: BLE001
-                # threeML 在 TTE 到达时间与全部本底窗都不重叠时会把这些窗
-                # 全部丢弃，随后 _fit_polynomials 里 all_bkg_masks[0] 抛
-                # IndexError。本底此时已从 cspec 拟合的 h5 还原，重拟合并非
-                # 必需，不能因此丢掉整个探测器；后续步骤若真的用不了会各自
-                # 给出明确提示。
-                log(
-                    f"警告: 探测器 {det} 的 TTE 本底重拟合失败"
-                    f"（{type(exc).__name__}: {exc}），"
-                    "本底沿用已还原的 cspec 拟合结果"
+                return _build_plugin_with_rsp(
+                    det=det,
+                    rsp=rsp,
+                    tte=tte,
+                    cspec=cspec,
+                    background_parts=background_parts,
+                    bin_start=bin_start,
+                    bin_end=bin_end,
+                    source_interval=source_interval,
+                    time_series=time_series,
                 )
-            time_series[det] = ts_tte
-
-        try:
-            print("时间间隔为：", source_interval, f"{bin_start:.2f}-{bin_end:.2f}")
-            ts_tte.set_active_time_interval(source_interval)
-        except Exception as exc:  # noqa: BLE001
-            log(
-                "警告: 无法为探测器 "
-                f"{det} 设置活动时间间隔 {source_interval}: {exc}"
-            )
-
-        try:
-            fig = ts_tte.view_lightcurve(bin_start, bin_end, dt=0.02)
-            plt.close(fig)
-        except Exception as exc:  # noqa: BLE001
-            log(f"无法创建时间序列图，跳过探测器 {det}: {exc}")
-
-        try:
-            ts_tte.create_time_bins(
-                start=[bin_start],
-                stop=[bin_end],
-                method="custom",
-            )
-            logg.info("创建时间bins: %.2f-%.2f", bin_start, bin_end)
-        except Exception as exc:  # noqa: BLE001
-            log(f"警告: 无法为探测器 {det} 创建时间bins: {exc}")
-            return None
-
-        try:
-            ts_tte.write_pha_from_binner(
-                file_name=f"gbm_tte_{det}",
-                overwrite=True,
-                force_rsp_write=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log(f"警告: 无法为探测器 {det} 写入PHA文件: {exc}")
-            return None
-
-        try:
-            plugin = OGIPLike(det, f"gbm_tte_{det}.pha", f"gbm_tte_{det}_bak.pha", f"gbm_tte_{det}.rsp", spectrum_number=1)
-
-            if det.startswith("b"):
-                if hasattr(plugin, 'energy_boundaries') and len(plugin.energy_boundaries) > 1 and len(plugin.energy_boundaries[1]) > 0:
-                    if plugin.energy_boundaries[1][0] < 200:
-                        plugin.set_active_measurements(exclude=['0-200','40000-c128'])
-                    else:
-                        plugin.set_active_measurements(exclude=['c0-c1','40000-c128'])
-                else:
-                    plugin.set_active_measurements(exclude=['0-200','40000-c128'])
-            else:
-                plugin.set_active_measurements(exclude=['0-8', '30-40','c126-c128']) #33-36
-
-            # plugin.rebin_on_background(1.0)
-
-            return plugin
-        except Exception as exc:  # noqa: BLE001
-            log(f"警告: 无法为探测器 {det} 创建插件: {exc}")
-            return None
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                # 这一份用不了：清掉该探测器的缓存，否则下一轮会直接复用它
+                time_series.pop(det, None)
+                log(
+                    f"警告: 探测器 {det} 用 {Path(rsp).name} 构建失败"
+                    f"（{type(exc).__name__}: {str(exc) or '无提示信息'}），"
+                    "改用下一份响应矩阵重试"
+                )
+        log(
+            f"警告: 探测器 {det} 的 {len(rsp_candidates)} 份响应矩阵都无法覆盖"
+            f" {source_interval}（最后错误 {type(last_exc).__name__}: "
+            f"{str(last_exc) or '无提示信息'}），跳过该探测器"
+        )
+        return None
     finally:
         os.chdir(cwd)
+
+
+def _build_plugin_with_rsp(
+    det: str,
+    rsp: str,
+    tte: str,
+    cspec: str,
+    background_parts: Sequence[str],
+    bin_start: float,
+    bin_end: float,
+    source_interval: str,
+    time_series: Dict[str, TimeSeriesBuilder],
+) -> OGIPLike:
+    """用指定响应矩阵构建探测器插件。
+
+    失败即抛异常，由 _build_gbm_plugin_for_detector 决定要不要换一份响应矩阵
+    重试。注意 IntervalOfInterestNotCovered 的消息是空串，异常文本本身没有
+    信息量，调用方靠 type(exc).__name__ 判断。
+    """
+    ts_tte = time_series.get(det)
+    if ts_tte is None:
+        log(f"background_interval: {background_parts}")
+        _build_cspec_background(
+            det,
+            cspec=cspec,
+            rsp=rsp,
+            background_parts=background_parts,
+            out_h5=f"{det}_bkg.h5",
+        )
+
+        ts_tte = TimeSeriesBuilder.from_gbm_tte(
+            det,
+            tte_file=tte,
+            rsp_file=rsp,
+            restore_background=f"{det}_bkg.h5",
+            poly_order=-1,
+        )
+        try:
+            ts_tte.set_background_interval(*background_parts)
+        except Exception as exc:  # noqa: BLE001
+            # threeML 在 TTE 到达时间与全部本底窗都不重叠时会把这些窗
+            # 全部丢弃，随后 _fit_polynomials 里 all_bkg_masks[0] 抛
+            # IndexError。本底此时已从 cspec 拟合的 h5 还原，重拟合并非
+            # 必需，不能因此丢掉整个探测器；后续步骤若真的用不了会各自
+            # 给出明确提示。
+            log(
+                f"警告: 探测器 {det} 的 TTE 本底重拟合失败"
+                f"（{type(exc).__name__}: {exc}），"
+                "本底沿用已还原的 cspec 拟合结果"
+            )
+        time_series[det] = ts_tte
+
+    try:
+        print("时间间隔为：", source_interval, f"{bin_start:.2f}-{bin_end:.2f}")
+        ts_tte.set_active_time_interval(source_interval)
+    except Exception as exc:  # noqa: BLE001
+        # 单次失败未必致命——write_pha_from_binner 之后会用实际 bin 再试一次，
+        # 所以这里仍只告警；真正用不了会在下面抛出并触发回退。
+        log(
+            "警告: 无法为探测器 "
+            f"{det} 设置活动时间间隔 {source_interval}: {exc}"
+        )
+
+    try:
+        fig = ts_tte.view_lightcurve(bin_start, bin_end, dt=0.02)
+        plt.close(fig)
+    except Exception as exc:  # noqa: BLE001
+        log(f"无法创建时间序列图，跳过探测器 {det}: {exc}")
+
+    ts_tte.create_time_bins(
+        start=[bin_start],
+        stop=[bin_end],
+        method="custom",
+    )
+    logg.info("创建时间bins: %.2f-%.2f", bin_start, bin_end)
+
+    ts_tte.write_pha_from_binner(
+        file_name=f"gbm_tte_{det}",
+        overwrite=True,
+        force_rsp_write=True,
+    )
+
+    plugin = OGIPLike(
+        det,
+        f"gbm_tte_{det}.pha",
+        f"gbm_tte_{det}_bak.pha",
+        f"gbm_tte_{det}.rsp",
+        spectrum_number=1,
+    )
+
+    if det.startswith("b"):
+        if hasattr(plugin, 'energy_boundaries') and len(plugin.energy_boundaries) > 1 and len(plugin.energy_boundaries[1]) > 0:
+            if plugin.energy_boundaries[1][0] < 200:
+                plugin.set_active_measurements(exclude=['0-200','40000-c128'])
+            else:
+                plugin.set_active_measurements(exclude=['c0-c1','40000-c128'])
+        else:
+            plugin.set_active_measurements(exclude=['0-200','40000-c128'])
+    else:
+        plugin.set_active_measurements(exclude=['0-8', '30-40','c126-c128']) #33-36
+
+    return plugin
