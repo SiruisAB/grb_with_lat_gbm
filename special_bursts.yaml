@@ -139,3 +139,11 @@ special_bursts:
   bnname: bn260708424
   description: 目录表缺本底窗，按同 T90(62.5s) 老暴中位数补
   background_interval: -42.08--15.62,73.75-104.58
+- name: bn260226443
+  bnname: bn260226443
+  description: 目录表缺本底窗，按同 T90(173.1s) 老暴中位数补
+  background_interval: -50.0--10.83,206.25-238.13
+- name: bn260411337
+  bnname: bn260411337
+  description: 目录表缺本底窗，按同 T90(32.8s) 老暴中位数补
+  background_interval: -28.33--7.08,39.17-73.88
